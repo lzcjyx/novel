@@ -1,0 +1,500 @@
+{
+  "updatedAt": "2026-05-07T11:48:17.610Z",
+  "createdAt": "2026-05-07T10:28:20.374Z",
+  "id": "CtEvELW9y6XbmbVi",
+  "name": "[NF] 01 — Novel Bootstrap",
+  "description": null,
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Collect project bootstrap inputs from the trigger form.\n// In production, use a Webhook + Form or Set node with\n// predefined values.\n// ============================================================\n\nreturn [{\n  json: {\n    project_name: $input.first().json.project_name || \"My Novel\",\n    project_slug: ($input.first().json.project_name || \"my-novel\")\n      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),\n    description: $input.first().json.description || \"\",\n    genre: $input.first().json.genre || [\"fantasy\"],\n    sub_genre: $input.first().json.sub_genre || [],\n    target_audience: $input.first().json.target_audience || \"18-35\",\n    tone: $input.first().json.tone || \"热血\",\n    style_profile_desc: $input.first().json.style_profile_desc || \"第三人称，信息密度高\",\n    target_total_words: $input.first().json.target_total_words || 500000,\n    daily_target_words_count: $input.first().json.daily_target_words_count || 3000,\n    blog_provider_val: $input.first().json.blog_provider_val || \"wordpress\",\n    auto_publish: $input.first().json.auto_publish || false,\n    quality_threshold: $input.first().json.quality_threshold || 85,\n    max_revise_count: $input.first().json.max_revise_count || 2,\n    trigger_bible: $input.first().json.trigger_bible || true\n  }\n}];"
+      },
+      "id": "node-002",
+      "name": "Prepare Project Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'projects') THEN 1 ELSE 0 END AS schema_ready;"
+      },
+      "id": "node-003",
+      "name": "Check Schema Ready",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.schema_ready }}",
+              "operation": "smaller",
+              "value2": 1
+            }
+          ]
+        }
+      },
+      "id": "node-004",
+      "name": "Schema Missing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ⚠️ Schema Not Initialized\n\nDatabase schema has not been initialized.\n\nPlease run the following SQL migrations using your **Neon Direct Connection**:\n\n1. `sql/000_neon_setup.sql`\n2. `sql/001_init_schema.sql`\n3. `sql/002_pgvector_indexes.sql`\n\n```bash\npsql \"$NEON_DATABASE_URL_DIRECT\" -f sql/000_neon_setup.sql\npsql \"$NEON_DATABASE_URL_DIRECT\" -f sql/001_init_schema.sql\npsql \"$NEON_DATABASE_URL_DIRECT\" -f sql/002_pgvector_indexes.sql\n```\n\nAfter running migrations, trigger this workflow again.",
+        "height": 300,
+        "width": 400
+      },
+      "id": "node-005",
+      "name": "Schema Not Ready Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json._sql }}"
+      },
+      "id": "node-006",
+      "name": "Create Project",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Build the bible generation prompt.\n// ============================================================\n\nconst project = $(\"Create Project\").first().json;\nconst input = $(\"Merge Input Data\").first().json;\n\nconst schemaObj = {\n  world_overview: \"世界观概述（500-800中文字）\",\n  power_system: {\n    name: \"力量体系名称\",\n    description: \"力量体系描述\",\n    rules: [\"规则示例1\"],\n    limitations: [\"限制示例1\"]\n  },\n  main_plot_threads: [{\n    title: \"剧情线标题\",\n    description: \"剧情线描述\",\n    thread_type: \"main|sub|background\"\n  }],\n  characters: [{\n    name: \"角色名\",\n    role: \"protagonist|antagonist|supporting|minor\",\n    appearance: \"外貌描述\",\n    personality: \"性格描述\",\n    speech_style: \"说话风格\",\n    motivation: \"核心动机\",\n    backstory: \"背景故事\"\n  }],\n  locations: [{\n    name: \"地点名\",\n    location_type: \"city|dungeon|wilderness|organization|other\",\n    description: \"描述\"\n  }],\n  organizations: [{\n    name: \"组织名\",\n    description: \"描述\",\n    goals: [\"目标1\"]\n  }],\n  items: [{\n    name: \"道具名\",\n    item_type: \"weapon|consumable|quest|key|other\",\n    description: \"描述\"\n  }],\n  style_guide: {\n    narrative_perspective: \"叙事视角, 如 first_person|third_person\",\n    positive_examples: [\"好的句式示例\"],\n    negative_examples: [\"避免的句式示例\"]\n  },\n  canon_rules: [{\n    rule_type: \"hard|soft\",\n    rule_text: \"规则内容\",\n    rationale: \"规则理由\"\n  }],\n  chapter_plans: [{\n    sequence: 1,\n    title: \"章节标题\",\n    plot_goals: [\"本章目标\"],\n    summary: \"章节概要用中文写（一句话）\",\n    target_word_count: 3000,\n    arc_stage: \"setup|build|climax|resolution\"\n  }]\n};\n\nconst prompt = \"你是一位资深小说策划编辑。请为以下新小说项目生成完整的初始圣经。\\n\\n项目信息：\\n- 书名：${project.name}\\n- 类型：${input.genre}\\n- 目标读者：${input.target_audience}\\n- 文风基调：${input.tone}\\n\\n请严格按以下 JSON schema 输出（所有 key 必须使用英文，所有内容的 value 用中文写）：\\n${JSON.stringify(schemaObj, null, 2)}\\n\\n输出要求：\\n1. 只输出合法 JSON，不要包在代码块里\\n2. world_overview 必须 500-800 中文字\\n3. 至少 5-10 个角色 characters\\n4. 至少 5 条 canon_rules（包含 hard 和 soft）\\n5. 至少 3-5 条 main_plot_threads\\n6. 前 10 章的 chapter_plans，sequence 从 1 到 10\\n7. 不要包含任何解释、寒暄或 markdown\";\n\nreturn [{\n  json: {\n    project: project,\n    prompt: prompt,\n    system_prompt: \"你是一位资深小说策划编辑。请输出严格合法的 JSON，所有字符串值必须用双引号括起来。所有 key 必须使用英文，所有内容用中文。不要输出任何解释、注释或代码块，只输出纯 JSON 对象。\",\n    schema: schemaObj\n  }\n}];"
+      },
+      "id": "node-007",
+      "name": "Build Bible Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "model": "deepseek-chat",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "={{ $json.system_prompt }}"
+            },
+            {
+              "role": "user",
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 32768,
+          "response_format": {
+            "type": "json_object"
+          }
+        },
+        "requestOptions": {}
+      },
+      "id": "node-008",
+      "name": "Gen Bible via OpenAI",
+      "type": "n8n-nodes-deepseek.deepSeek",
+      "typeVersion": 1,
+      "position": [
+        1340,
+        460
+      ],
+      "credentials": {
+        "deepSeekApi": {
+          "id": "si5XfG0zsr4yuxSz",
+          "name": "DeepSeek account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nlet rawText = \"\";\n\nif (response.message && response.message.content) {\n  rawText = response.message.content;\n} else if (response.choices && response.choices[0] && response.choices[0].message) {\n  rawText = response.choices[0].message.content;\n} else if (typeof response === \"string\") {\n  rawText = response;\n} else {\n  rawText = JSON.stringify(response);\n}\n\nrawText = rawText.trim();\nif (rawText.startsWith(\"```\")) {\n  var nl = rawText.indexOf(\"\\n\");\n  if (nl >= 0) rawText = rawText.substring(nl + 1);\n}\nif (rawText.endsWith(\"```\")) {\n  rawText = rawText.substring(0, rawText.length - 3).trim();\n}\n\nfunction repairJSON(text) {\n  var out = \"\";\n  var i = 0;\n  while (i < text.length) {\n    out += text[i];\n    if (text[i] === \":\" && i + 1 < text.length) {\n      var j = i + 1;\n      while (j < text.length && (text[j] === \" \" || text[j] === \"\\n\" || text[j] === \"\\r\" || text[j] === \"\\t\")) j++;\n      if (j < text.length) {\n        var ch = text[j];\n        var isQuoted = (ch === '\"');\n        var isBracket = (ch === \"[\" || ch === \"{\");\n        var isNum = (ch >= \"0\" && ch <= \"9\") || ch === \"-\";\n        var tok4 = text.substring(j, j + 4);\n        var tok5 = text.substring(j, j + 5);\n        var isKeyword = (tok4 === \"true\" || tok5 === \"false\" || tok4 === \"null\");\n        if (!isQuoted && !isBracket && !isNum && !isKeyword) {\n          var k = j;\n          while (k < text.length && text[k] !== \",\" && text[k] !== \"\\n\" && text[k] !== \"}\" && text[k] !== \"]\") k++;\n          var val = text.substring(j, k).trim();\n          var escaped = val.replace(/\"/g, '\\\\\"').replace(/\\\\/g, '\\\\\\\\');\n          out += '\"' + val + '\"';\n          i = k - 1;\n        } else {\n          i = j - 1;\n        }\n      }\n    }\n    i++;\n  }\n  return out;\n}\n\n// Remove trailing commas\nrawText = rawText.replace(/,(s*[}\\]])/g, \"$1\");\n\nlet bible;\ntry {\n  bible = JSON.parse(rawText);\n} catch (e1) {\n  try {\n    var repaired = repairJSON(rawText);\n    repaired = repaired.replace(/,(s*[}\\]])/g, \"$1\");\n    bible = JSON.parse(repaired);\n  } catch (e2) {\n    throw new Error(\n      \"JSON failed after repair. \" +\n      \"Err: \" + e1.message + \" | \" +\n      \"Repair err: \" + e2.message\n    );\n  }\n}\n\nif (!bible.world_overview || !bible.characters || !bible.main_plot_threads) {\n  throw new Error(\"Missing fields: \" + Object.keys(bible).join(\", \"));\n}\n\nreturn [{ json: { project: $(\"Create Project\").first().json, bible: bible } }];"
+      },
+      "id": "node-009",
+      "name": "Parse Bible Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst project = data.project;\nconst bible = data.bible;\nconst items = [];\n\n// style_guides\nif (bible.style_guide) {\n  items.push({ json: {\n    table: 'style_guides',\n    values: [project.id, '\\u521d\\u59cb\\u98ce\\u683c\\u6307\\u5357', bible.style_guide.narrative_perspective || '', JSON.stringify(bible.style_guide.positive_examples || []), JSON.stringify(bible.style_guide.negative_examples || [])],\n    sql: 'INSERT INTO style_guides (project_id, name, style_text, positive_examples, negative_examples) VALUES ($1, $2, $3, $4, $5) RETURNING id'\n  }});\n}\n\n// characters - matching actual schema (name, aliases, role, personality, motivation, speech_style, appearance, backstory)\n(bible.characters || []).forEach(function(c) {\n  items.push({ json: {\n    table: 'characters',\n    values: [project.id, c.name, c.role || '', c.personality || '', c.motivation || '', c.speech_style || '', c.appearance || '', c.backstory || ''],\n    sql: 'INSERT INTO characters (project_id, name, role, personality, motivation, speech_style, appearance, backstory) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id'\n  }});\n});\n\n// locations\n(bible.locations || []).forEach(function(l) {\n  items.push({ json: {\n    table: 'locations',\n    values: [project.id, l.name, l.location_type || '', l.description || ''],\n    sql: 'INSERT INTO locations (project_id, name, type, description) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n});\n\n// organizations\n(bible.organizations || []).forEach(function(o) {\n  items.push({ json: {\n    table: 'organizations',\n    values: [project.id, o.name, o.description || '', JSON.stringify(o.goals || [])],\n    sql: 'INSERT INTO organizations (project_id, name, description, goals) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n});\n\n// items\n(bible.items || []).forEach(function(it) {\n  items.push({ json: {\n    table: 'items',\n    values: [project.id, it.name, it.item_type || '', it.description || ''],\n    sql: 'INSERT INTO items (project_id, name, item_type, description) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n});\n\n// world_lore\nif (bible.world_overview) {\n  items.push({ json: {\n    table: 'world_lore',\n    values: [project.id, '\\u4e16\\u754c\\u89c2\\u6982\\u8ff0', 'world_overview', bible.world_overview],\n    sql: 'INSERT INTO world_lore (project_id, title, lore_type, content) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n}\n\n// magic_or_power_systems\nif (bible.power_system) {\n  items.push({ json: {\n    table: 'magic_or_power_systems',\n    values: [project.id, bible.power_system.name || '\\u529b\\u91cf\\u4f53\\u7cfb', bible.power_system.description || '', JSON.stringify(bible.power_system.rules || []), JSON.stringify(bible.power_system.limitations || [])],\n    sql: 'INSERT INTO magic_or_power_systems (project_id, name, description, rules, limitations) VALUES ($1, $2, $3, $4, $5) RETURNING id'\n  }});\n}\n\n// canon_rules - FIXED: removed rationale, reorder (rule_type, rule_text, severity)\n(bible.canon_rules || []).forEach(function(r) {\n  items.push({ json: {\n    table: 'canon_rules',\n    values: [project.id, r.rule_type || 'hard', r.rule_text || '', r.rule_type === 'soft' ? 'soft' : 'hard'],\n    sql: 'INSERT INTO canon_rules (project_id, rule_type, rule_text, severity) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n});\n\n// plot_threads - FIXED: match actual schema (name, description)\n(bible.main_plot_threads || []).forEach(function(pt) {\n  items.push({ json: {\n    table: 'plot_threads',\n    values: [project.id, pt.title || '', pt.description || '', pt.thread_type === 'main' ? 1 : pt.thread_type === 'sub' ? 2 : 3],\n    sql: 'INSERT INTO plot_threads (project_id, name, description, priority) VALUES ($1, $2, $3, $4) RETURNING id'\n  }});\n});\n\n// chapter_plans - FIXED: match actual schema (outline instead of summary, no arc_stage)\n(bible.chapter_plans || []).forEach(function(cp) {\n  items.push({ json: {\n    table: 'chapter_plans',\n    values: [project.id, cp.sequence, cp.title || '', JSON.stringify(cp.plot_goals || []), cp.summary || '', cp.target_word_count || 3000],\n    sql: 'INSERT INTO chapter_plans (project_id, sequence, title, plot_goals, outline, target_word_count) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id'\n  }});\n});\n\nreturn items;"
+      },
+      "id": "node-010",
+      "name": "Split Bible to DB Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process ALL items from Split Bible to DB Rows\nconst items = $input.all();\n\nfunction esc(val) {\n  if (val === undefined || val === null) return \"NULL\";\n  if (typeof val === \"boolean\") return val ? \"TRUE\" : \"FALSE\";\n  if (typeof val === \"number\") return String(val);\n  var str = typeof val === \"object\" ? JSON.stringify(val) : String(val);\n  return \"'\" + str.replace(/'/g, \"''\") + \"'\";\n}\n\nreturn items.map(function(item) {\n  var j = item.json;\n  var vals = j.values || [];\n  var sql = j.sql || \"\";\n\n  for (var i = 0; i < vals.length; i++) {\n    sql = sql.replace(\"$\" + (i + 1), esc(vals[i]));\n  }\n\n  return { json: { table: j.table, sql: sql } };\n});"
+      },
+      "id": "node-011",
+      "name": "Build Insert SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}"
+      },
+      "id": "node-012",
+      "name": "Insert Bible Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get bible data from Parse Bible Response\nconst bibleData = $(\"Parse Bible Response\").first().json;\nconst bible = bibleData.bible;\nconst project = bibleData.project;\nconst vectors = [];\n\n// Characters\n(bible.characters || []).forEach(function(c) {\n  vectors.push({\n    json: {\n      project_id: project.id,\n      source_type: \"character_profile\",\n      title: c.name,\n      content: JSON.stringify({name: c.name, role: c.role, personality: c.personality, speech_style: c.speech_style, motivation: c.motivation, backstory: c.backstory}),\n      input_text: c.name + \" - \" + (c.role || \"\") + \" - \" + (c.personality || \"\")\n    }\n  });\n});\n\n// World overview\nif (bible.world_overview) {\n  vectors.push({\n    json: {\n      project_id: project.id,\n      source_type: \"world_lore\",\n      title: \"World Overview\",\n      content: bible.world_overview,\n      input_text: bible.world_overview\n    }\n  });\n}\n\n// Power system\nif (bible.power_system) {\n  vectors.push({\n    json: {\n      project_id: project.id,\n      source_type: \"world_lore\",\n      title: \"Power System: \" + (bible.power_system.name || \"\"),\n      content: JSON.stringify(bible.power_system),\n      input_text: (bible.power_system.name || \"\") + \" - \" + (bible.power_system.description || \"\")\n    }\n  });\n}\n\n// Locations\n(bible.locations || []).forEach(function(l) {\n  vectors.push({\n    json: {\n      project_id: project.id,\n      source_type: \"world_lore\",\n      title: \"Location: \" + l.name,\n      content: JSON.stringify(l),\n      input_text: l.name + \" - \" + (l.description || \"\")\n    }\n  });\n});\n\n// Organizations\n(bible.organizations || []).forEach(function(o) {\n  vectors.push({\n    json: {\n      project_id: project.id,\n      source_type: \"world_lore\",\n      title: \"Organization: \" + o.name,\n      content: JSON.stringify(o),\n      input_text: o.name + \" - \" + (o.description || \"\")\n    }\n  });\n});\n\nreturn vectors;"
+      },
+      "id": "node-013",
+      "name": "Prepare Vector Documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate placeholder embedding vector + inline SQL for insert\nconst items = $input.all();\n\nfunction esc(val) {\n  if (val === undefined || val === null) return \"NULL\";\n  if (typeof val === \"boolean\") return val ? \"TRUE\" : \"FALSE\";\n  if (typeof val === \"number\") return String(val);\n  var str = typeof val === \"object\" ? JSON.stringify(val) : String(val);\n  return \"'\" + str.replace(/'/g, \"''\") + \"'\";\n}\n\nreturn items.map(function(item) {\n  var d = item.json;\n  var vec = new Array(1536).fill(0);\n  var vecStr = \"'[\" + vec.join(\",\") + \"]'\";\n  var sql = \"INSERT INTO vector_documents (project_id, source_type, title, content, embedding) VALUES (\"\n    + esc(d.project_id) + \", \"\n    + esc(d.source_type) + \", \"\n    + esc(d.title) + \", \"\n    + esc(d.content) + \", \"\n    + vecStr + \"::vector\"\n  + \") ON CONFLICT DO NOTHING RETURNING id;\";\n  return { json: { sql: sql, embedding: vec } };\n});"
+      },
+      "id": "node-014",
+      "name": "Generate Embeddings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}"
+      },
+      "id": "node-015",
+      "name": "Store Vector Documents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const project = $('Create Project').first().json;\nconst items = $input.all();\n\nreturn [{\n  json: {\n    project_id: project.id,\n    project_name: project.name,\n    status: 'bootstrap_complete',\n    message: 'Project \"' + project.name + '\" (ID: ' + project.id + ') bootstrapped. Set status to active, then run Weekly Arc Planner.',\n    entities_created: items.length\n  }\n}];"
+      },
+      "id": "node-016",
+      "name": "Bootstrap Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build INSERT SQL with proper PostgreSQL single-quote escaping\nconst input = $(\"Prepare Project Input\").first().json;\n\nfunction esc(val) {\n  if (val === undefined || val === null) return \"NULL\";\n  if (typeof val === \"boolean\") return val ? \"TRUE\" : \"FALSE\";\n  if (typeof val === \"number\") return String(val);\n  const str = typeof val === \"object\" ? JSON.stringify(val) : String(val);\n  // PostgreSQL: single quotes, doubling any embedded single quotes\n  return \"'\" + str.replace(/'/g, \"''\") + \"'\";\n}\n\nconst name = esc(input.project_name);\nconst genre = esc(input.genre ? input.genre.join(\", \") : \"fantasy\");\nconst audience = esc(input.target_audience);\nconst style = esc(JSON.stringify({\n  tone: input.tone || \"热血\",\n  narrative_style: input.style_profile_desc || \"\",\n  forbidden_phrases: [\"眼中闪过\",\"嘴角上扬\",\"不由得\"],\n  preferred_techniques: [\"动作链\",\"对话推进\",\"感官细节\"]\n}));\nconst totalWords = esc(input.target_total_words || 500000);\nconst dailyWords = esc(input.daily_target_words_count || 3000);\nconst blog = esc(input.blog_provider_val || \"wordpress\");\nconst autoPub = esc(input.auto_publish || false);\nconst qThreshold = esc(input.quality_threshold || 85);\nconst meta = esc(JSON.stringify({\n  synopsis: input.description || \"\",\n  sub_genre: input.sub_genre || [],\n  slug: input.project_slug || \"\",\n  max_revise_count: input.max_revise_count || 2\n}));\n\nconst sql = \"INSERT INTO projects (name, genre, target_audience, style_profile, total_target_words, daily_target_words, blog_provider, auto_publish, quality_threshold, status, metadata) VALUES (\" + name + \", \" + genre + \", \" + audience + \", \" + style + \", \" + totalWords + \", \" + dailyWords + \", \" + blog + \", \" + autoPub + \", \" + qThreshold + \", \" + esc(\"draft\") + \", \" + meta + \") RETURNING id, name, status, created_at;\";\n\nreturn [{ json: { ...input, schema_ready: $json.schema_ready, _sql: sql } }];"
+      },
+      "id": "node-merge-001",
+      "name": "Merge Input Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        520
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Project Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Project Input": {
+      "main": [
+        [
+          {
+            "node": "Check Schema Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Schema Ready": {
+      "main": [
+        [
+          {
+            "node": "Schema Missing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schema Missing?": {
+      "main": [
+        [
+          {
+            "node": "Schema Not Ready Note",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Input Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Project": {
+      "main": [
+        [
+          {
+            "node": "Build Bible Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Bible Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gen Bible via OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gen Bible via OpenAI": {
+      "main": [
+        [
+          {
+            "node": "Parse Bible Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Bible Response": {
+      "main": [
+        [
+          {
+            "node": "Split Bible to DB Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Bible to DB Rows": {
+      "main": [
+        [
+          {
+            "node": "Build Insert SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Insert SQL": {
+      "main": [
+        [
+          {
+            "node": "Insert Bible Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Bible Data": {
+      "main": [
+        [
+          {
+            "node": "Prepare Vector Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Vector Documents": {
+      "main": [
+        [
+          {
+            "node": "Generate Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Store Vector Documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Vector Documents": {
+      "main": [
+        [
+          {
+            "node": "Bootstrap Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Input Data": {
+      "main": [
+        [
+          {
+            "node": "Create Project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Tokyo"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "versionId": "bed5b92b-5f39-4a1c-b373-2db3d6feba4d",
+  "activeVersionId": null,
+  "versionCounter": 17,
+  "triggerCount": 0,
+  "shared": [
+    {
+      "updatedAt": "2026-05-07T10:28:20.377Z",
+      "createdAt": "2026-05-07T10:28:20.377Z",
+      "role": "workflow:owner",
+      "workflowId": "CtEvELW9y6XbmbVi",
+      "projectId": "JzFsgsHcvfsemyYM",
+      "project": {
+        "updatedAt": "2026-05-07T09:46:36.968Z",
+        "createdAt": "2026-05-07T09:46:36.968Z",
+        "id": "JzFsgsHcvfsemyYM",
+        "name": "Unnamed Project",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "7e63a630-4760-4bf1-95b8-350c141d6df9"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": null
+}

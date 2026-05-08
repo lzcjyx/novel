@@ -1,0 +1,12 @@
+.env
+*.log
+data/
+node_modules/
+orchestrator/node_modules/
+writer-service/node_modules/
+tauri-app/node_modules/
+tauri-app/src-tauri/target/
+paper/
+startup.log
+writer-service.log
+orchestrator.log

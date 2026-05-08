@@ -1,0 +1,20 @@
+{
+  "name": "novel-orchestrator",
+  "version": "1.0.0",
+  "description": "Smart scheduler for AI Novel Factory — triggers n8n workflows automatically",
+  "main": "scheduler.js",
+  "scripts": {
+    "start": "node scheduler.js",
+    "dev": "node --watch scheduler.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3",
+    "pg": "^8.20.0",
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

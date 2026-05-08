@@ -1,0 +1,466 @@
+{
+  "name": "[NF] 04 — Review and Repair",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    chapter_id: $input.first().json.chapter_id || '',\n    action: $input.first().json.action || 'repair_and_review',\n    // repair_and_review | manual_publish | reject\n    force_publish: $input.first().json.force_publish || false\n  }\n}];"
+      },
+      "id": "node-002",
+      "name": "Prepare Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        680,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, p.auto_publish, p.quality_threshold, p.max_revise_count\nFROM chapters c\nJOIN projects p ON c.project_id = p.id\nWHERE c.id = $1;",
+        "additionalFields": {
+          "values": [
+            {
+              "name": "1",
+              "value": "={{ $json.chapter_id }}"
+            }
+          ]
+        }
+      },
+      "id": "node-003",
+      "name": "Load Chapter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "node-004",
+      "name": "Chapter Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM chapter_versions\nWHERE chapter_id = $1\nORDER BY version_number DESC\nLIMIT 1;\n\nSELECT * FROM agent_reviews\nWHERE chapter_id = $1\nORDER BY created_at DESC;\n\nSELECT * FROM generation_jobs\nWHERE chapter_id = $1\nORDER BY created_at DESC\nLIMIT 1;",
+        "additionalFields": {
+          "values": [
+            {
+              "name": "1",
+              "value": "={{ $json.id }}"
+            }
+          ]
+        }
+      },
+      "id": "node-005",
+      "name": "Load Version & Reviews",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build revision prompt inputs\nconst chapter = $('Load Chapter').first().json;\nconst versionAndReviews = $('Load Version & Reviews').all();\n\nlet latestVersion = {};\nlet reviews = [];\nlet job = {};\n\nfor (const item of versionAndReviews) {\n  const j = item.json;\n  if (j.version_number) latestVersion = j;\n  if (j.agent_name) reviews.push(j);\n  if (j.job_type) job = j;\n}\n\nconst writingBrief = {\n  chapter: {\n    title: chapter.title,\n    body_markdown: latestVersion.body_markdown || chapter.body_markdown,\n    summary: latestVersion.summary || chapter.summary\n  },\n  review_reports: reviews.map(r => ({\n    agent_name: r.agent_name,\n    score: r.score,\n    pass: r.pass,\n    blocking_issues: r.blocking_issues,\n    minor_issues: r.minor_issues,\n    recommendations: r.recommendations\n  })),\n  quality_threshold: chapter.quality_threshold || 85,\n  revise_count: job.revise_count || 0,\n  project_id: chapter.project_id\n};\n\nreturn [{\n  json: {\n    chapter_id: chapter.id,\n    project_id: chapter.project_id,\n    job_id: job.id,\n    latest_version: latestVersion,\n    writing_brief: writingBrief,\n    revise_count: job.revise_count || 0,\n    max_revise_count: chapter.max_revise_count || 2\n  }\n}];"
+      },
+      "id": "node-006",
+      "name": "Build Revision Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.WRITER_SERVICE_URL || 'http://writer-service:8787' }}/revise-chapter",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"job_id\": \"{{ $json.job_id || 'manual-repair' }}\",\n  \"project_id\": \"{{ $json.project_id }}\",\n  \"writing_brief\": {{ JSON.stringify($json.writing_brief) }},\n  \"prompt_type\": \"revision_writer\"\n}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "node-007",
+      "name": "Call Writer Revise",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1560,
+        460
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OFervrjfRP7togIg",
+          "name": "Writer Service Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO chapter_versions (chapter_id, project_id, version_number, version_type, title, body_markdown, summary, word_count, model_provider, created_by_agent, change_log)\nVALUES ($1, $2, $3, 'revised', $4, $5, $6, $7, 'claude', 'revision_writer', $8)\nRETURNING id;\n\nUPDATE chapters\nSET body_markdown = $5, title = $4, summary = $6, word_count = $7,\n    current_version_id = (SELECT id FROM chapter_versions WHERE chapter_id = $1 ORDER BY version_number DESC LIMIT 1),\n    status = 'revised', updated_at = now()\nWHERE id = $1;\n\nUPDATE generation_jobs\nSET revise_count = revise_count + 1, status = 'reviewing', updated_at = now()\nWHERE id = $9;",
+        "additionalFields": {
+          "values": [
+            {
+              "name": "1",
+              "value": "={{ $('Build Revision Input').first().json.chapter_id }}"
+            },
+            {
+              "name": "2",
+              "value": "={{ $('Build Revision Input').first().json.project_id }}"
+            },
+            {
+              "name": "3",
+              "value": "={{ ($('Build Revision Input').first().json.latest_version.version_number || 0) + 1 }}"
+            },
+            {
+              "name": "4",
+              "value": "={{ $json.data.title }}"
+            },
+            {
+              "name": "5",
+              "value": "={{ $json.data.body_markdown }}"
+            },
+            {
+              "name": "6",
+              "value": "={{ $json.data.summary }}"
+            },
+            {
+              "name": "7",
+              "value": "={{ $json.data.word_count }}"
+            },
+            {
+              "name": "8",
+              "value": "={{ ($json.data.change_log || []).join('; ') }}"
+            },
+            {
+              "name": "9",
+              "value": "={{ $('Build Revision Input').first().json.job_id }}"
+            }
+          ]
+        }
+      },
+      "id": "node-008",
+      "name": "Save Revised Version",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// After revision, re-run lightweight review\nconst chapter = $('Load Chapter').first().json;\nconst revision = $('Call Writer Revise').first().json.data;\n\nreturn [{\n  json: {\n    chapter_id: chapter.id,\n    chapter: revision,\n    project_policy: { quality_threshold: chapter.quality_threshold }\n  }\n}];"
+      },
+      "id": "node-009",
+      "name": "Prepare Re-Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "model": "deepseek-chat",
+        "prompt": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "你是 safety_reviewer。只输出合法 JSON。对章节进行安全审查，检查是否有密钥泄露、版权问题、平台禁止内容。blocking issue：出现密钥、连接字符串、token、版权抄袭、违法内容。"
+            },
+            {
+              "role": "user",
+              "content": "chapter:\\n{{ JSON.stringify($json.chapter) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7
+        },
+        "requestOptions": {}
+      },
+      "id": "node-010",
+      "name": "Quick Safety Check",
+      "type": "n8n-nodes-deepseek.deepSeek",
+      "typeVersion": 1,
+      "position": [
+        2220,
+        460
+      ],
+      "credentials": {
+        "deepSeekApi": {
+          "id": "si5XfG0zsr4yuxSz",
+          "name": "DeepSeek account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide: publish, re-revise, or flag for human\nconst safetyResult = JSON.parse($input.first().json.choices[0].message.content);\nconst revisionInput = $('Build Revision Input').first().json;\n\nlet decision = 'publish_ready';\nif (!safetyResult.pass) {\n  decision = 'needs_human_review';\n} else if (revisionInput.revise_count >= revisionInput.max_revise_count) {\n  decision = 'needs_human_review';\n}\n\nreturn [{\n  json: {\n    chapter_id: revisionInput.chapter_id,\n    project_id: revisionInput.project_id,\n    job_id: revisionInput.job_id,\n    safety_pass: safetyResult.pass,\n    decision: decision,\n    message: decision === 'publish_ready'\n      ? 'Chapter revised and passed review. Ready for manual publish.'\n      : 'Chapter still has issues — needs human review.'\n  }\n}];"
+      },
+      "id": "node-011",
+      "name": "Final Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE chapters SET status = $2, updated_at = now() WHERE id = $1;\nUPDATE generation_jobs SET status = $2, updated_at = now() WHERE id = $3;",
+        "additionalFields": {
+          "values": [
+            {
+              "name": "1",
+              "value": "={{ $json.chapter_id }}"
+            },
+            {
+              "name": "2",
+              "value": "={{ $json.decision === 'publish_ready' ? 'final' : 'needs_human_review' }}"
+            },
+            {
+              "name": "3",
+              "value": "={{ $json.job_id }}"
+            }
+          ]
+        }
+      },
+      "id": "node-012",
+      "name": "Update Chapter Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        2660,
+        460
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "0w5EYts2acIZab9Y",
+          "name": "Neon Pooled (n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    status: 'complete',\n    message: $('Final Decision').first().json.message,\n    chapter_id: $('Final Decision').first().json.chapter_id,\n    decision: $('Final Decision').first().json.decision\n  }\n}];"
+      },
+      "id": "node-013",
+      "name": "Repair Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        460
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Input": {
+      "main": [
+        [
+          {
+            "node": "Load Chapter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Chapter": {
+      "main": [
+        [
+          {
+            "node": "Chapter Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chapter Exists?": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Load Version & Reviews",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Version & Reviews": {
+      "main": [
+        [
+          {
+            "node": "Build Revision Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Revision Input": {
+      "main": [
+        [
+          {
+            "node": "Call Writer Revise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Writer Revise": {
+      "main": [
+        [
+          {
+            "node": "Save Revised Version",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Revised Version": {
+      "main": [
+        [
+          {
+            "node": "Prepare Re-Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Re-Review": {
+      "main": [
+        [
+          {
+            "node": "Quick Safety Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quick Safety Check": {
+      "main": [
+        [
+          {
+            "node": "Final Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Decision": {
+      "main": [
+        [
+          {
+            "node": "Update Chapter Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Chapter Status": {
+      "main": [
+        [
+          {
+            "node": "Repair Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Tokyo"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "novel-factory"
+    },
+    {
+      "name": "repair"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0"
+}
