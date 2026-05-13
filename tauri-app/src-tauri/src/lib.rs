@@ -594,7 +594,7 @@ async fn test_model_provider(
         "deepseek" => Box::new(ai::deepseek::DeepSeekProvider {
             api_key: api_key.clone(),
             base_url: base_url.unwrap_or_else(|| "https://api.deepseek.com".into()),
-            model: model.unwrap_or_else(|| "deepseek-v4-pro[1m]".into()),
+            model: model.unwrap_or_else(|| "deepseek-v4-pro".into()),
             embedding_model: "text-embedding-3-small".into(),
             timeout_secs: 600,
         }),

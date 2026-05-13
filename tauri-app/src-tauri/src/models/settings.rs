@@ -24,7 +24,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             provider: "deepseek".into(),
-            model: "deepseek-v4-pro[1m]".into(),
+            model: "deepseek-v4-pro".into(),
             base_url: "https://api.deepseek.com".into(),
             embedding_model: "text-embedding-3-small".into(),
             embedding_provider: "none".into(),
