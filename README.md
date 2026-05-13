@@ -1,130 +1,104 @@
 # AI Novel Factory
 
-生产级、可复制、可扩展的 AI 长篇小说自动生产流水线。
+AI 长篇小说自动生产桌面应用。本地运行，零外部依赖（仅需 API Key）。
 
 ## 架构
 
 ```
-n8n (流程编排)
-  ├──→ Neon PostgreSQL + pgvector (状态存储 / 向量检索)
-  ├──→ writer-service → Claude Code CLI (章节生成)
-  ├──→ Claude / OpenAI / Gemini API (多 Agent 审稿)
-  └──→ WordPress / REST API (博客发布)
+Tauri v2 Desktop App
+├── React + TypeScript (PlayStation-style UI)
+└── Rust Backend
+    ├── SQLite (rusqlite bundled) — 全部状态存储
+    ├── reqwest — 直接调用 AI API
+    ├── keyring — OS 系统密钥链存储 API Key
+    └── workflow_runner — 代替 n8n 流程编排
 ```
+
+**不依赖**: Docker、n8n、Neon PostgreSQL、Node.js 服务、Claude Code CLI
+
+## 支持的模型
+
+| 用途 | 支持 |
+|------|------|
+| 小说创作 | DeepSeek / OpenAI / Anthropic Claude / Gemini / OpenAI Compatible |
+| 向量化 (RAG) | OpenAI / 智谱 GLM / OpenAI Compatible（独立配置） |
+| 本地模型 | Ollama / vLLM（OpenAI Compatible 预设） |
+
+## 快速开始
+
+1. 下载 GitHub Release 安装包，安装
+2. 打开 Settings → 选择模型提供商 → 填入 API Key → Save & Test Connection
+3. Projects → + New Novel → 填写世界观设定 → 生成小说圣经
+4. Dashboard → Generate Weekly Plan → 生成 10 章章节计划
+5. Dashboard → Write Chapter Now → AI 生成章节 → 7 Agent 审稿 → 自动修订 → 导出 .md
+
+## 核心功能
+
+- **多小说项目管理** — 独立圣经、角色、地点、世界观
+- **结构化小说圣经** — 角色/地点/组织/道具/力量体系/世界设定/硬性规则/剧情线/伏笔/风格指南/时间线
+- **章节版本管理** — draft → review → revised → final 完整状态机
+- **7 Agent 审稿** — continuity / character / plot_logic / pacing / style / safety / publication + review_arbiter
+- **自动修订循环** — score < threshold → 修订 → 重审 → 直到达标或耗尽重试次数
+- **RAG 向量检索** — 嵌入圣经数据，写作时检索相关上下文
+- **知识图谱** — 交互式人物/地点/组织关系图（Obsidian 风格）
+- **自我学习** — 用户输入范文/网页学习 → AI 提取写作技巧 → 注入后续章节
+- **进度可视化** — 实时 pipeline 时间线，每步耗时统计
+- **人工审核参与** — 编辑章节内容、修改圣经数据、审阅/驳回 Agent 评审
+- **Markdown 导出** — 自动导出 .md 文件到本地目录
+- **幂等保护** — generation_jobs 唯一约束，重复点击不重复生成
+- **API Key 安全** — OS 系统密钥链存储 + SQLite 加密回退，日志脱敏
 
 ## 项目结构
 
 ```
-novel/
-├── sql/
-│   ├── 000_neon_setup.sql          # 扩展 + 基础配置
-│   ├── 001_init_schema.sql         # 全部表 + 索引 + 触发器 + 种子数据
-│   └── 002_pgvector_indexes.sql    # pgvector HNSW 索引
-├── n8n/
-│   ├── 01_novel_bootstrap.workflow.json       # 项目初始化
-│   ├── 02_bible_ingestion.workflow.json       # 圣经更新
-│   ├── 03_daily_chapter_production.workflow.json  # 每日章节生产
-│   ├── 04_review_and_repair.workflow.json     # 手动返修
-│   └── 05_weekly_arc_planner.workflow.json    # 每周剧情规划
-├── prompts/                       # AI prompt 模板 (12 个)
-├── writer-service/
-│   ├── package.json
-│   ├── server.js                  # Express HTTP 服务
-│   ├── Dockerfile
-│   └── .env.example
-├── docs/
-│   ├── neon_setup.md              # Neon 数据库设置
-│   ├── n8n_setup.md               # n8n 工作流设置
-│   ├── operations.md              # 日常运维手册
-│   └── troubleshooting.md         # 故障排除
-├── .env.example
-└── README.md
+tauri-app/
+├── src/                          # React 前端
+│   ├── App.tsx                   # 主组件
+│   ├── index.css                 # DESIGN.md PlayStation 风格
+│   └── main.tsx
+├── src-tauri/
+│   ├── Cargo.toml
+│   ├── prompts/                  # 14 AI Prompt 模板
+│   ├── migrations/
+│   │   └── 001_init_sqlite.sql   # 29 个业务表
+│   ├── tests/                    # 集成测试
+│   └── src/
+│       ├── lib.rs                # 25+ Tauri 命令
+│       ├── db/                   # SQLite CRUD (12 模块)
+│       ├── models/               # 数据模型
+│       ├── ai/                   # ModelClient + 5 providers + ProviderFactory
+│       ├── workflow/             # 流程引擎 (10 模块)
+│       ├── prompts/              # 加载 + 渲染
+│       ├── security/             # 密钥链 + 脱敏
+│       └── export/               # Markdown 导出
+├── package.json
+└── vite.config.ts
 ```
 
-## 快速开始
-
-### 1. Neon 数据库
+## 测试
 
 ```bash
-# 创建 Neon 项目 → 获取连接字符串 → 设置环境变量
-export NEON_DATABASE_URL_DIRECT="postgresql://USER:PASSWORD@ep-xxx.region.aws.neon.tech/novel_factory?sslmode=require"
-
-# 执行 migration
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/000_neon_setup.sql
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/001_init_schema.sql
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/002_pgvector_indexes.sql
+cd tauri-app
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-详见 [docs/neon_setup.md](docs/neon_setup.md)。
+测试覆盖: 全流程基准测试 (7 项) + 数据库 CRUD (4 项) + 审稿仲裁器 (2 项) = **13 项测试**
 
-### 2. Writer Service
+## 数据存储
+
+- **SQLite**: `Documents/AI-Novels/ai-novel-factory.db`
+- **Markdown 导出**: `Documents/AI-Novels/novel-XXXXXXXX/ch001.md`
+- **API Key**: OS 系统密钥链 + SQLite 加密回退
+
+## 开发
 
 ```bash
-cd writer-service
-cp .env.example .env    # 编辑 .env 填入真实值
+cd tauri-app
 npm install
-npm start               # 监听 :8787
+npm run tauri dev
+npm run tauri build
 ```
 
-### 3. n8n 工作流
+## 技术栈
 
-1. 复制 `.env.example` → `.env`，填入所有真实值。
-2. 在 n8n 中创建 credentials（参考 [docs/n8n_setup.md](docs/n8n_setup.md)）。
-3. 导入 `n8n/` 目录下的 5 个 workflow JSON。
-4. 首次运行：手动触发 Workflow 01 初始化项目。
-5. 手动运行 Workflow 05 生成首批章节计划。
-6. 激活 Workflow 03 和 Workflow 05 的定时触发。
-
-详见 [docs/n8n_setup.md](docs/n8n_setup.md)。
-
-## 5 个工作流
-
-| # | 工作流 | 触发方式 | 说明 |
-|---|--------|---------|------|
-| 01 | Novel Bootstrap | 手动 | 创建项目、生成初始圣经、写入数据库 |
-| 02 | Bible Ingestion | 手动/被调用 | 提取新设定、更新 canon、写入向量 |
-| 03 | Daily Chapter Production | 每天 09:00 JST | 完整的 21 节点生产管线 |
-| 04 | Review and Repair | 手动 | 修订失败章节、通过后发布 |
-| 05 | Weekly Arc Planner | 每周一 10:00 JST | 分析节奏、生成未来 7-14 章计划 |
-
-## 7 个审稿 Agent
-
-| Agent | 职责 | Blocking 条件 |
-|-------|------|-------------|
-| continuity_reviewer | 时间线、地点、道具、设定一致性 | 违反 hard canon |
-| character_reviewer | 人物性格、口吻、动机一致性 | 核心性格背离 |
-| plot_logic_reviewer | 情节因果、冲突推进、机械降神 | 核心剧情目标未完成 |
-| pacing_reviewer | 节奏、爽点、钩子、连载适配 | 无实质冲突或推进 |
-| style_reviewer | 文风、语言质量、AI 味 | 文风严重偏离 |
-| safety_reviewer | 安全、版权、密钥泄露 | 任何敏感内容 |
-| publication_reviewer | Markdown、博客适配 | 格式严重损坏 |
-
-## 关键约束
-
-- **Neon 数据库**：不用 Docker PostgreSQL。Pooled connection 用于 n8n，Direct connection 用于 migration。
-- **幂等控制**：`INSERT ... ON CONFLICT DO NOTHING RETURNING id`，不用 session-level advisory lock。
-- **发布安全**：默认 draft，仅当 `auto_publish=true AND final_score>=85` 时 publish。
-- **密钥管理**：所有 API key 使用 n8n credentials 或环境变量，绝不硬编码。
-- **向量检索**：始终限定 `project_id`，防止跨项目上下文污染。
-- **Locked canon**：不自动覆盖。低置信度变更进入 `human_review_required`。
-- **防重复发布**：`blog_posts` 有 `UNIQUE(project_id, chapter_id)`，发布前检查。
-
-## 环境变量
-
-见 `.env.example`。关键变量：
-
-| 变量 | 说明 |
-|------|------|
-| `NEON_DATABASE_URL_POOLED` | n8n 日常读写连接 |
-| `NEON_DATABASE_URL_DIRECT` | migration/管理连接 |
-| `EMBEDDING_DIMENSION` | 向量维度，默认 1536 |
-| `EMBEDDING_MODEL` | Embedding 模型 |
-| `WRITER_SERVICE_URL` | writer-service 地址 |
-| `WRITER_SERVICE_TOKEN` | writer-service 认证 token |
-| `ANTHROPIC_API_KEY` | Claude API key |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `WORDPRESS_BASE_URL` | WordPress 站点 URL |
-
-## License
-
-MIT
+React 19 + TypeScript + Vite · Rust + Tauri v2 · SQLite (rusqlite) · reqwest · keyring · async-trait · chrono · serde_json · uuid · sha2 · regex · dirs

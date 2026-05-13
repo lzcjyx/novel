@@ -1,7 +1,7 @@
 [package]
 name = "ai-novel-factory"
 version = "0.1.0"
-description = "AI Novel Factory Desktop Monitor"
+description = "AI Novel Factory Desktop App"
 authors = ["you"]
 edition = "2021"
 
@@ -12,11 +12,27 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+rusqlite = { version = "0.31", features = ["bundled", "load_extension"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
+keyring = { version = "3" }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+regex = "1"
+dirs = "5"
+async-trait = "0.1"
+log = "0.4"

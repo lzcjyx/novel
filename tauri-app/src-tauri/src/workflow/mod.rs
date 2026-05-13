@@ -1,0 +1,10 @@
+pub mod lock;
+pub mod chapter_production;
+pub mod novel_bootstrap;
+pub mod bible_ingestion;
+pub mod review_repair;
+pub mod weekly_planner;
+pub mod review_agents;
+pub mod review_arbiter;
+pub mod canon_updater;
+pub mod learning;

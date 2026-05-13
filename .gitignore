@@ -2,11 +2,12 @@
 *.log
 data/
 node_modules/
-orchestrator/node_modules/
-writer-service/node_modules/
 tauri-app/node_modules/
 tauri-app/src-tauri/target/
 paper/
 startup.log
 writer-service.log
 orchestrator.log
+大模型应用开发春招学习计划_更新版.md
+DESIGN.md
+.claude
