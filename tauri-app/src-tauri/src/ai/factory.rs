@@ -37,6 +37,21 @@ impl ProviderConfig {
                 model: self.model.clone(), embedding_model: self.embedding_model.clone(),
                 timeout_secs: self.timeout_secs,
             })),
+            "kimi" => Ok(Box::new(deepseek::DeepSeekProvider {
+                api_key: self.api_key.clone(), base_url: self.base_url.clone(),
+                model: self.model.clone(), embedding_model: self.embedding_model.clone(),
+                timeout_secs: self.timeout_secs,
+            })),
+            "zhipu" => Ok(Box::new(deepseek::DeepSeekProvider {
+                api_key: self.api_key.clone(), base_url: self.base_url.clone(),
+                model: self.model.clone(), embedding_model: self.embedding_model.clone(),
+                timeout_secs: self.timeout_secs,
+            })),
+            "custom" => Ok(Box::new(openai_compat::OpenAICompatibleProvider {
+                api_key: self.api_key.clone(), base_url: self.base_url.clone(),
+                model: self.model.clone(), embedding_model: self.embedding_model.clone(),
+                timeout_secs: self.timeout_secs,
+            })),
             _ => Err(format!("Unknown provider: {}", self.provider_type)),
         }
     }
