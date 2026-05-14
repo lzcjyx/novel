@@ -10,33 +10,28 @@ pub async fn extract_knowledge(
     source_url: Option<&str>,
 ) -> Result<Vec<LearningEntry>, String> {
     let system = format!(
-        "你是一位资深文学分析师，擅长从文本中提取可学习的写作技巧。\n\
-         分析以下文本，按类别提取写作技巧，输出JSON数组。\n\
-         类别：plot_pattern(情节模式), character_archetype(人物塑造), dialogue_style(对话风格), \
-         sentence_structure(句式结构), pacing_technique(节奏控制), description_method(描写手法), narrative_device(叙事技巧)\n\
-         每个技巧包含：pattern_name(技巧名称), pattern_description(100-300字详细分析), \
-         example_text(原文范例片段), application_notes(如何在自己的小说中应用该技巧)\n\
-         来源：{}", source_title
+        "从文本中提取3-5个最突出的写作技巧。每个技巧用50-100字简要说明即可。\n\
+         类别：plot(情节), character(人物), dialogue(对话), style(文风), pacing(节奏)\n\
+         输出JSON数组。来源：{}", source_title
     );
 
-    let user = format!("请分析以下文本，提取写作技巧：\n\n{}", &text[..text.len().min(8000)]);
+    let user = format!("分析以下文本，提取写作技巧：\n\n{}", &text[..text.len().min(4000)]);
 
     let schema = serde_json::json!({
-        "type": "array",
+        "type": "array", "maxItems": 5,
         "items": {
             "type": "object",
             "properties": {
                 "category": {"type": "string"},
                 "pattern_name": {"type": "string"},
                 "pattern_description": {"type": "string"},
-                "example_text": {"type": "string"},
                 "application_notes": {"type": "string"}
             },
             "required": ["category", "pattern_name", "pattern_description"]
         }
     });
 
-    let output = provider.generate_json(&system, &user, &schema, 8192).await?;
+    let output = provider.generate_json(&system, &user, &schema, 4096).await?;
     let arr = output.as_array().ok_or("Expected JSON array from knowledge extraction")?;
 
     let entries: Vec<LearningEntry> = arr.iter().map(|item| LearningEntry {
