@@ -516,22 +516,12 @@ async fn update_canon_rule(state: tauri::State<'_, AppState>, rule_id: String, l
 
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
-    let mut settings = db::settings::get_settings(&state.db)?;
-    // Show masked key if available (try keychain first, then SQLite fallback)
-    if let Ok(key) = get_api_key_fallback(&state, &settings.provider) {
-        settings.model = format!("{} (key: {})", settings.model, keychain::mask_key(&key));
-    }
-    Ok(settings)
+    db::settings::get_settings(&state.db)
 }
 
 #[tauri::command]
 async fn update_settings(state: tauri::State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
-    let mut clean = settings.clone();
-    // Don't save the masked key from display
-    if clean.model.contains("(key:") {
-        if let Some(pos) = clean.model.find(" (key:") { clean.model.truncate(pos); }
-    }
-    db::settings::save_settings(&state.db, &clean)
+    db::settings::save_settings(&state.db, &settings)
 }
 
 #[tauri::command]

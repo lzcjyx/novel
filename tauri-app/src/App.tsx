@@ -644,7 +644,7 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
           </select>
         </div>
         <div className="bible-edit-field">
-          <label>Model</label>
+          <label>Model <span className="text-meta">(editable — type any model name)</span></label>
           <input className="text-input" value={settings?.model || ""} onChange={e => invoke("update_settings", { settings: { ...settings, model: e.target.value } }).then(refreshSettings)} placeholder={provider==="deepseek"?"deepseek-v4-pro":provider==="kimi"?"moonshot-v1-8k":provider==="zhipu"?"glm-4-flash":"model name"} />
         </div>
         <div className="bible-edit-field">
