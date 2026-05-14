@@ -752,15 +752,23 @@ function LearnPage() {
 
   const handleLearnUrl = async () => {
     if (!url.trim()) return;
+    // Normalize URL (add https:// if no protocol)
+    let fetchUrl = url.trim();
+    if (!/^https?:\/\//i.test(fetchUrl)) fetchUrl = "https://" + fetchUrl;
     setLearning(true); setResult("Fetching page...");
     try {
-      // Frontend fetch (no CORS in Tauri webview, no nested runtime crash)
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 30000);
-      const resp = await fetch(url, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const html = await resp.text();
+      let html: string;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30000);
+        const resp = await fetch(fetchUrl, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        html = await resp.text();
+      } catch {
+        setResult("Frontend blocked, trying backend...");
+        html = await invoke<string>("fetch_url_text", { url: fetchUrl });
+      }
       if (html.length > 1_000_000) throw new Error("Page too large (>1MB)");
 
       // Strip HTML tags in JS (same logic as Rust, no crash risk)

@@ -265,6 +265,22 @@ async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, 
 }
 
 #[tauri::command]
+async fn fetch_url_text(url: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build().map_err(|e| format!("Client: {}", e))?;
+    let resp = client.get(&url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; NovelBot/1.0)")
+        .send().await.map_err(|e| format!("Fetch: {}", e))?;
+    if let Some(len) = resp.content_length() {
+        if len > 5_000_000 { return Err("Page too large".into()); }
+    }
+    let html = resp.text().await.map_err(|e| format!("Read: {}", e))?;
+    if html.len() > 1_000_000 { return Err("Page too large".into()); }
+    Ok(html)
+}
+
+#[tauri::command]
 async fn get_learning_entries(state: tauri::State<'_, AppState>, project_id: String) -> Result<Vec<LearningEntry>, String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let mut stmt = conn.prepare(
@@ -822,6 +838,7 @@ pub fn run() {
             update_bible_entry,
             learn_from_text,
             get_learning_entries,
+            fetch_url_text,
             delete_learning_entry,
             rebuild_vector_index,
         ])

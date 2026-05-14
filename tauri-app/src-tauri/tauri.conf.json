@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "AI Novel Factory",
-        "width": 960,
-        "height": 700,
-        "minWidth": 720,
-        "minHeight": 480,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
         "center": true,
         "resizable": true,
         "decorations": true
@@ -35,6 +35,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "prompts/*.md": "prompts/",
+      "migrations/*.sql": "migrations/"
+    }
   }
 }

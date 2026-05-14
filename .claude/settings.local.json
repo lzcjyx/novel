@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(node *)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(cargo build *)",
+      "Bash(npx tsc *)",
+      "Bash(taskkill /f /im ai-novel-factory.exe)",
+      "Bash(npm run *)",
+      "Bash(cargo test *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
