@@ -247,85 +247,20 @@ async fn rebuild_vector_index(state: tauri::State<'_, AppState>, project_id: Str
 }
 
 #[tauri::command]
-async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, text: String, source_title: String) -> Result<Vec<LearningEntry>, String> {
+async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, text: String, source_title: String, source_type: Option<String>) -> Result<Vec<LearningEntry>, String> {
+    let stype = source_type.as_deref().unwrap_or("manual");
     let provider = get_provider(&state)?;
-    let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, "manual", None).await?;
+    let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, stype, None).await?;
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     for entry in &entries {
         let id = Database::new_uuid();
         conn.execute(
             "INSERT INTO learning_entries (id, project_id, source_type, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
-             VALUES (?1, ?2, 'manual', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            rusqlite::params![id, project_id, source_title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![id, project_id, stype, source_title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
         ).map_err(|e| format!("Insert learning: {}", e))?;
     }
     add_log(&state, &format!("Learned {} patterns from '{}'", entries.len(), source_title));
-    Ok(entries)
-}
-
-#[tauri::command]
-async fn learn_from_url(state: tauri::State<'_, AppState>, project_id: String, url: String) -> Result<Vec<LearningEntry>, String> {
-    // Wrap in catch_unwind to prevent any panic from crashing the app
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(learn_from_url_inner(&state, project_id, url))
-    }));
-    match result {
-        Ok(Ok(entries)) => Ok(entries),
-        Ok(Err(e)) => Err(e),
-        Err(panic_info) => {
-            let msg = if let Some(s) = panic_info.downcast_ref::<String>() { s.clone() }
-                else if let Some(s) = panic_info.downcast_ref::<&str>() { s.to_string() }
-                else { "Unknown panic in web fetch".to_string() };
-            Err(format!("Web Learn crashed: {}. Try a different URL or check your connection.", msg))
-        }
-    }
-}
-
-async fn learn_from_url_inner(state: &AppState, project_id: String, url: String) -> Result<Vec<LearningEntry>, String> {
-    let provider = get_provider(state)?;
-    // Fetch with timeout and size limit
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build().map_err(|e| format!("Client build failed: {}", e))?;
-    let resp = client.get(&url)
-        .header("User-Agent", "Mozilla/5.0 (compatible; NovelBot/1.0)")
-        .send().await.map_err(|e| format!("Fetch failed: {}. Check URL and internet.", e))?;
-    if let Some(len) = resp.content_length() {
-        if len > 5_000_000 { return Err("Page too large (>5MB).".into()); }
-    }
-    let html = resp.text().await.map_err(|e| format!("Read body failed: {}", e))?;
-    if html.len() > 1_000_000 { return Err("Page too large (>1MB).".into()); }
-
-    // Strip HTML tags
-    let raw = html.replace("<br>", "\n").replace("<p>", "\n").replace("</p>", "\n");
-    let raw = regex::Regex::new(r"<[^>]*>").unwrap().replace_all(&raw, "");
-    let raw = raw.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<")
-        .replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'");
-    // Filter: keep content lines (>40 chars, exclude nav/scripts)
-    let lines: Vec<&str> = raw.lines().map(|l| l.trim()).filter(|l| {
-        l.len() > 40 && !l.starts_with("function") && !l.starts_with("var ")
-        && !l.to_lowercase().contains("cookie") && !l.to_lowercase().contains("subscribe")
-    }).collect();
-    let content = lines.join("\n");
-    let text = content.chars().take(15000).collect::<String>();
-    if text.len() < 200 {
-        return Err("Could not extract meaningful content. Try a page with article/novel text.".into());
-    }
-    let title = url.split('/').last().unwrap_or("web source");
-    log::info!("Web Learn: fetched {} chars from {}", text.len(), title);
-    let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, title, "web", Some(&url)).await?;
-    {
-        let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-        for entry in &entries {
-            let id = Database::new_uuid();
-            conn.execute(
-                "INSERT INTO learning_entries (id, project_id, source_type, source_url, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
-                 VALUES (?1, ?2, 'web', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                rusqlite::params![id, project_id, url, title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
-            ).map_err(|e| format!("Insert learning: {}", e))?;
-        }
-    }
     Ok(entries)
 }
 
@@ -886,7 +821,6 @@ pub fn run() {
             update_chapter_plan,
             update_bible_entry,
             learn_from_text,
-            learn_from_url,
             get_learning_entries,
             delete_learning_entry,
             rebuild_vector_index,

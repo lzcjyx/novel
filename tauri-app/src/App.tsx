@@ -752,13 +752,36 @@ function LearnPage() {
 
   const handleLearnUrl = async () => {
     if (!url.trim()) return;
-    setLearning(true); setResult("Fetching & extracting...");
+    setLearning(true); setResult("Fetching page...");
     try {
-      const r = await invoke<any[]>("learn_from_url", { projectId: selected, url });
+      // Frontend fetch (no CORS in Tauri webview, no nested runtime crash)
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 30000);
+      const resp = await fetch(url, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const html = await resp.text();
+      if (html.length > 1_000_000) throw new Error("Page too large (>1MB)");
+
+      // Strip HTML tags in JS (same logic as Rust, no crash risk)
+      let raw = html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?p[^>]*>/gi, "\n");
+      raw = raw.replace(/<[^>]*>/g, "");
+      raw = raw.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+      raw = raw.replace(/&quot;/g, "\"").replace(/&#39;/g, "'");
+      const lines = raw.split("\n").map(l => l.trim()).filter(l =>
+        l.length > 40 && !l.startsWith("function") && !l.startsWith("var ") &&
+        !l.toLowerCase().includes("cookie") && !l.toLowerCase().includes("subscribe")
+      );
+      const text = lines.join("\n").slice(0, 15000);
+      if (text.length < 200) throw new Error("No meaningful content found. Try a page with article/novel text.");
+
+      setResult("Extracting patterns...");
+      const sourceTitle = url.split("/").pop() || "web source";
+      const r = await invoke<any[]>("learn_from_text", { projectId: selected, text, sourceTitle, sourceType: "web" });
       setResult(`Learned ${r.length} patterns`);
       setUrl("");
       loadEntries();
-    } catch (e) { setResult("Error: " + e); }
+    } catch (e: any) { setResult("Error: " + (e.message || String(e))); }
     setLearning(false);
   };
 
