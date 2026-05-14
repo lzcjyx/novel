@@ -44,7 +44,12 @@ impl DeepSeekProvider {
         }
 
         for attempt in 0..3 {
-            let resp = client.post(format!("{}/v1/chat/completions", self.base_url))
+            let api_url = if self.base_url.ends_with("/v1") || self.base_url.ends_with("/v1/") {
+                format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
+            } else {
+                format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+            };
+            let resp = client.post(&api_url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
                 .json(&body)
@@ -119,7 +124,12 @@ impl ModelClient for DeepSeekProvider {
             .build()
             .map_err(|e| format!("Client: {}", e))?;
 
-        let resp = client.post(format!("{}/v1/embeddings", self.base_url))
+        let emb_url = if self.base_url.ends_with("/v1") || self.base_url.ends_with("/v1/") {
+            format!("{}/embeddings", self.base_url.trim_end_matches('/'))
+        } else {
+            format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'))
+        };
+        let resp = client.post(&emb_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&json!({"model": self.embedding_model, "input": texts}))
             .send().await.map_err(|e| format!("HTTP: {}", e))?
