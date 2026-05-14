@@ -227,15 +227,38 @@ async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, 
 #[tauri::command]
 async fn learn_from_url(state: tauri::State<'_, AppState>, project_id: String, url: String) -> Result<Vec<LearningEntry>, String> {
     let provider = get_provider(&state)?;
-    let client = reqwest::Client::new();
-    let resp = client.get(&url).send().await.map_err(|e| format!("Fetch: {}", e))?;
+    // Fetch with timeout
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build().map_err(|e| format!("Client: {}", e))?;
+    let resp = client.get(&url).send().await.map_err(|e| format!("Fetch failed: {}", e))?;
     let html = resp.text().await.map_err(|e| format!("Read: {}", e))?;
-    // Simple HTML-to-text: strip tags
-    let text = html.replace(|c: char| c == '<' || c == '>', "\n").chars()
-        .filter(|c| !matches!(c, '<'..='>' | '&'..=';')).collect::<String>()
-        .split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = text.chars().take(20000).collect::<String>();
+
+    // Strip HTML tags → raw text
+    let raw = html.replace("<br>", "\n").replace("<p>", "\n").replace("</p>", "\n");
+    let raw = regex::Regex::new(r"<[^>]*>").unwrap().replace_all(&raw, "");
+    // Decode common HTML entities
+    let raw = raw.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", "\"").replace("&#39;", "'");
+    // Keep only lines that look like content (longer than 40 chars, exclude nav/scripts/ads)
+    let lines: Vec<&str> = raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            l.len() > 40 &&
+            !l.starts_with("function") && !l.starts_with("var ") && !l.starts_with("if(") &&
+            !l.starts_with("<!--") && !l.starts_with("//") && !l.starts_with("}}") &&
+            !l.to_lowercase().contains("cookie") && !l.to_lowercase().contains("subscribe")
+        })
+        .collect();
+    let content = lines.join("\n");
+    let text = content.chars().take(15000).collect::<String>();
+
+    if text.len() < 200 {
+        return Err("Could not extract meaningful content from this URL. Try a different page.".into());
+    }
+
     let title = url.split('/').last().unwrap_or("web source");
+    add_log(&state, &format!("Fetched {} chars from {}", text.len(), title));
     let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, title, "web", Some(&url)).await?;
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     for entry in &entries {
@@ -589,44 +612,23 @@ async fn test_model_provider(
         );
     }
 
-    // Build provider directly with the given key (no keychain round-trip)
-    let client: Box<dyn ModelClient> = match provider.as_str() {
-        "deepseek" => Box::new(ai::deepseek::DeepSeekProvider {
-            api_key: api_key.clone(),
-            base_url: base_url.unwrap_or_else(|| "https://api.deepseek.com".into()),
-            model: model.unwrap_or_else(|| "deepseek-v4-pro".into()),
-            embedding_model: "text-embedding-3-small".into(),
-            timeout_secs: 600,
+    // Build provider via ProviderFactory (single source of truth)
+    let client: Box<dyn ModelClient> = ai::factory::ProviderConfig {
+        provider_type: provider.clone(),
+        api_key: api_key.clone(),
+        base_url: base_url.unwrap_or_else(|| match provider.as_str() {
+            "deepseek" => "https://api.deepseek.com".into(),
+            "kimi" => "https://api.moonshot.cn/v1".into(),
+            "zhipu" => "https://open.bigmodel.cn/api/paas/v4".into(),
+            "openai" => "https://api.openai.com/v1".into(),
+            "anthropic" => "https://api.anthropic.com".into(),
+            "gemini" => "https://generativelanguage.googleapis.com/v1beta".into(),
+            _ => "https://api.openai.com/v1".into(),
         }),
-        "openai" => Box::new(ai::openai::OpenAIProvider {
-            api_key: api_key.clone(),
-            base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
-            model: model.unwrap_or_else(|| "gpt-4o".into()),
-            embedding_model: "text-embedding-3-small".into(),
-            timeout_secs: 600,
-        }),
-        "openai_compat" => Box::new(ai::openai_compat::OpenAICompatibleProvider {
-            api_key: api_key.clone(),
-            base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".into()),
-            model: model.unwrap_or_else(|| "gpt-4o".into()),
-            embedding_model: "text-embedding-3-small".into(),
-            timeout_secs: 600,
-        }),
-        "anthropic" => Box::new(ai::anthropic::AnthropicProvider {
-            api_key: api_key.clone(),
-            base_url: base_url.unwrap_or_else(|| "https://api.anthropic.com".into()),
-            model: model.unwrap_or_else(|| "claude-sonnet-4-6".into()),
-            timeout_secs: 600,
-        }),
-        "gemini" => Box::new(ai::gemini::GeminiProvider {
-            api_key: api_key.clone(),
-            base_url: base_url.unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".into()),
-            model: model.unwrap_or_else(|| "gemini-2.5-pro".into()),
-            embedding_model: "text-embedding-004".into(),
-            timeout_secs: 600,
-        }),
-        _ => return Err(format!("Unknown provider: {}", provider)),
-    };
+        model: model.unwrap_or_else(|| "gpt-4o".into()),
+        embedding_model: "text-embedding-3-small".into(),
+        timeout_secs: 600,
+    }.build()?;
 
     let start = std::time::Instant::now();
     match client.generate_text("You are a helpful assistant.", "Say 'OK' in one word.", 10).await {
