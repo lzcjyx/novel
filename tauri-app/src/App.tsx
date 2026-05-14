@@ -272,16 +272,18 @@ function ProjectList({ refresh }: { refresh: () => void }) {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="bible-edit-field">
-              <label>Genre</label>
-              <select className="select" value={form.genre} onChange={e => setForm({...form, genre: e.target.value})}>
-                <option value="fantasy">Fantasy</option><option value="xianxia">Xianxia</option><option value="wuxia">Wuxia</option><option value="scifi">Sci-Fi</option><option value="urban">Urban</option><option value="historical">Historical</option><option value="mystery">Mystery</option><option value="romance">Romance</option>
-              </select>
+              <label>Genre (type or select)</label>
+              <input value={form.genre} onChange={e => setForm({...form, genre: e.target.value})} list="genres" placeholder="e.g. 修仙, 科幻, 都市异能..." />
+              <datalist id="genres">
+                <option value="修仙" /><option value="武侠" /><option value="科幻" /><option value="都市" /><option value="历史" /><option value="悬疑" /><option value="言情" /><option value="无限流" /><option value="末世" /><option value="游戏异界" />
+              </datalist>
             </div>
             <div className="bible-edit-field">
-              <label>Tone</label>
-              <select className="select" value={form.tone} onChange={e => setForm({...form, tone: e.target.value})}>
-                <option value="热血">热血</option><option value="轻松">轻松</option><option value="悬疑">悬疑</option><option value="暗黑">暗黑</option><option value="史诗">史诗</option><option value="幽默">幽默</option>
-              </select>
+              <label>Tone (type or select)</label>
+              <input value={form.tone} onChange={e => setForm({...form, tone: e.target.value})} list="tones" placeholder="e.g. 热血, 轻松, 暗黑..." />
+              <datalist id="tones">
+                <option value="热血" /><option value="轻松" /><option value="悬疑" /><option value="暗黑" /><option value="史诗" /><option value="幽默" /><option value="温馨" /><option value="冷酷" /><option value="烧脑" />
+              </datalist>
             </div>
           </div>
           <div className="bible-edit-field">
@@ -571,6 +573,7 @@ function BiblePage() {
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button className="btn btn-sm btn-primary" onClick={saveBibleEdit}>Save</button>
             <button className="btn btn-sm btn-secondary" onClick={() => setEditingItem(null)}>Cancel</button>
+            <button className="btn btn-sm btn-commerce" style={{marginLeft:8}} onClick={async () => { await saveBibleEdit(); await invoke("rebuild_vector_index", { projectId: selected }); alert("Applied to all — vector index rebuilt."); }}>Apply to All & Rebuild Index</button>
           </div>
         </div>
       )}

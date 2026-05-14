@@ -208,6 +208,45 @@ async fn generate_next_chapter(app: tauri::AppHandle, state: tauri::State<'_, Ap
 }
 
 #[tauri::command]
+async fn rebuild_vector_index(state: tauri::State<'_, AppState>, project_id: String) -> Result<String, String> {
+    let provider = get_provider(&state)?;
+    let emb_provider = get_embedding_provider(&state).ok();
+    let embed = emb_provider.as_ref().map(|p| p.as_ref()).unwrap_or(provider.as_ref());
+    let bible_data = crate::db::bible::get_bible(&state.db, &project_id)?;
+
+    let mut texts: Vec<(String, &str, String)> = Vec::new();
+    for c in &bible_data.characters {
+        let content = format!("角色: {}\n性格: {}\n动机: {}\n说话风格: {}\n外貌: {}\n背景: {}",
+            c.name, c.personality.as_deref().unwrap_or_default(), c.motivation.as_deref().unwrap_or_default(),
+            c.speech_style.as_deref().unwrap_or_default(), c.appearance.as_deref().unwrap_or_default(), c.backstory.as_deref().unwrap_or_default());
+        texts.push((c.id.clone(), "character", content));
+    }
+    for l in &bible_data.locations { texts.push((l.id.clone(), "location", l.description.as_deref().unwrap_or_default().to_string())); }
+    for l in &bible_data.world_lore { texts.push((l.id.clone(), "world_lore", l.content.as_deref().unwrap_or_default().to_string())); }
+    for r in &bible_data.canon_rules { texts.push((r.id.clone(), "canon_rule", r.rule_text.as_deref().unwrap_or_default().to_string())); }
+    for pt in &bible_data.plot_threads { texts.push((pt.id.clone(), "plot_thread", pt.description.as_deref().unwrap_or_default().to_string())); }
+
+    // Clear old vectors + rebuild
+    {
+        let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+        conn.execute("DELETE FROM vector_document_metadata WHERE project_id = ?1", rusqlite::params![project_id])
+            .map_err(|e| format!("Clear vectors: {}", e))?;
+    }
+    let contents: Vec<String> = texts.iter().map(|(_, _, c)| c.clone()).collect();
+    let embeddings = embed.embed(&contents).await.map_err(|e| format!("Embed: {}", e))?;
+    let mut inserted = 0;
+    for (i, (source_id, source_type, content)) in texts.iter().enumerate() {
+        if i < embeddings.len() {
+            let title = content.chars().take(40).collect::<String>();
+            crate::db::vector_store::insert_vector_document(&state.db, &project_id, source_type, Some(source_id), &title, content, "{}", &embeddings[i]).ok();
+            inserted += 1;
+        }
+    }
+    add_log(&state, &format!("Vector index rebuilt: {} documents", inserted));
+    Ok(format!("Rebuilt vector index with {} documents", inserted))
+}
+
+#[tauri::command]
 async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, text: String, source_title: String) -> Result<Vec<LearningEntry>, String> {
     let provider = get_provider(&state)?;
     let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, "manual", None).await?;
@@ -833,6 +872,7 @@ pub fn run() {
             learn_from_url,
             get_learning_entries,
             delete_learning_entry,
+            rebuild_vector_index,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
