@@ -617,7 +617,7 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
     if (!apiKey.trim()) { setTestResult("Error: Please enter an API key first."); return; }
     setTesting(true); setTestResult("Connecting...");
     try {
-      const r = await invoke<{ ok: boolean; message: string; latency_ms?: number }>("test_model_provider", { provider, apiKey: apiKey.trim(), baseUrl: null, model: null });
+      const r = await invoke<{ ok: boolean; message: string; latency_ms?: number }>("test_model_provider", { provider, apiKey: apiKey.trim(), baseUrl: null, model: settings?.model || null });
       setTestResult(r.ok ? `Connected! (${r.latency_ms ?? "?"}ms) — ${r.message}` : `FAIL: ${r.message}`);
       if (r.ok) setApiKey("");
     } catch (e) { setTestResult("Error: " + e); }
@@ -642,6 +642,10 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
             <option value="openai_compat">OpenAI Compatible</option>
             <option value="custom">Custom...</option>
           </select>
+        </div>
+        <div className="bible-edit-field">
+          <label>Model</label>
+          <input className="text-input" value={settings?.model || ""} onChange={e => invoke("update_settings", { settings: { ...settings, model: e.target.value } }).then(refreshSettings)} placeholder={provider==="deepseek"?"deepseek-v4-pro":provider==="kimi"?"moonshot-v1-8k":provider==="zhipu"?"glm-4-flash":"model name"} />
         </div>
         <div className="bible-edit-field">
           <label>API Key {savedProvider && savedProvider !== provider ? "(saved for " + savedProvider + ")" : savedProvider ? "(saved)" : "(not yet saved)"}</label>

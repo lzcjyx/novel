@@ -632,7 +632,15 @@ async fn test_model_provider(
             "gemini" => "https://generativelanguage.googleapis.com/v1beta".into(),
             _ => "https://api.openai.com/v1".into(),
         }),
-        model: model.unwrap_or_else(|| "gpt-4o".into()),
+        model: model.unwrap_or_else(|| match provider.as_str() {
+            "deepseek" => "deepseek-v4-pro".into(),
+            "kimi" => "moonshot-v1-8k".into(),
+            "zhipu" => "glm-4-flash".into(),
+            "openai" => "gpt-4o".into(),
+            "anthropic" => "claude-sonnet-4-6".into(),
+            "gemini" => "gemini-2.5-pro".into(),
+            _ => "gpt-4o".into(),
+        }),
         embedding_model: "text-embedding-3-small".into(),
         timeout_secs: 600,
     }.build()?;
