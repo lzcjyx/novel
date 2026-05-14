@@ -35,7 +35,7 @@ impl DeepSeekProvider {
                 {"role": "user", "content": user}
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.7,
+            "temperature": 1.0,
             "stream": false
         });
 
