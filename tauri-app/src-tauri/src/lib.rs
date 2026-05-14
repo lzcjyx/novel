@@ -248,6 +248,7 @@ async fn rebuild_vector_index(state: tauri::State<'_, AppState>, project_id: Str
 
 #[tauri::command]
 async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, text: String, source_title: String, source_type: Option<String>) -> Result<Vec<LearningEntry>, String> {
+    if project_id.is_empty() { return Err("No project selected. Select a project first.".into()); }
     let stype = source_type.as_deref().unwrap_or("manual");
     let provider = get_provider(&state)?;
     let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, stype, None).await?;
@@ -255,7 +256,7 @@ async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, 
     for entry in &entries {
         let id = Database::new_uuid();
         conn.execute(
-            "INSERT INTO learning_entries (id, project_id, source_type, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
+            "INSERT OR IGNORE INTO learning_entries (id, project_id, source_type, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![id, project_id, stype, source_title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
         ).map_err(|e| format!("Insert learning: {}", e))?;
@@ -758,6 +759,17 @@ pub fn run() {
                 logs: Mutex::new(Vec::new()),
                 running: Mutex::new(false),
             });
+
+            // Close button minimizes to system tray (quit via tray menu)
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        if let Some(w) = handle.get_webview_window("main") { let _ = w.hide(); }
+                    }
+                });
+            }
 
             // System tray
             use tauri::{

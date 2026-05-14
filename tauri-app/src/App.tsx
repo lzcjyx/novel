@@ -62,7 +62,8 @@ function App() {
 
   const ctx = { projects, selected, setSelected, settings, refreshSettings, status, logs, loading, setLoading, msg, setMsg };
 
-  const pages: Record<string, React.ReactNode> = {
+  // Pre-render all pages, show/hide with CSS to preserve state across tab switches
+  const pageComponents: Record<string, React.ReactNode> = {
     dashboard: <Dashboard />,
     projects: <ProjectList refresh={loadProjects} />,
     chapters: <Chapters />,
@@ -95,7 +96,9 @@ function App() {
           </select>
         </div>
         <main className="app-main">
-          {pages[page] || <Dashboard />}
+          {Object.entries(pageComponents).map(([key, component]) => (
+            <div key={key} style={{ display: page === key ? "block" : "none" }}>{component}</div>
+          ))}
         </main>
       </div>
     </Ctx.Provider>
