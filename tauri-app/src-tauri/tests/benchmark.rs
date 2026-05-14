@@ -225,3 +225,52 @@ async fn benchmark_full_pipeline() {
 
     println!("\n=== ALL TESTS PASSED ===");
 }
+
+// ---- Web Learn HTML parsing tests ----
+#[test]
+fn test_html_parsing_extracts_content() {
+    let html = r#"<!DOCTYPE html><html><head><script>var x=1;</script></head><body>
+    <nav>Home About Contact</nav>
+    <p>这是一段测试小说内容。秋风萧瑟，落叶纷飞，林风独自走在古道上。</p>
+    <p>他心中思绪万千，回想起这些年的经历，不禁感慨万千。从默默无闻到名震天下，这条路走得太过艰难。</p>
+    <div class="sidebar">Subscribe to newsletter</div>
+    <footer>Copyright 2024 All rights reserved. This site uses cookies.</footer>
+    </body></html>"#;
+
+    let raw = html.replace("<br>", "\n").replace("<p>", "\n").replace("</p>", "\n");
+    let raw = regex::Regex::new(r"<[^>]*>").unwrap().replace_all(&raw, "");
+    let raw = raw.replace("&nbsp;", " ").replace("&amp;", "&");
+
+    let lines: Vec<&str> = raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            l.len() > 40 &&
+            !l.starts_with("function") && !l.starts_with("var ") &&
+            !l.to_lowercase().contains("cookie") && !l.to_lowercase().contains("subscribe")
+        })
+        .collect();
+    let content = lines.join("\n");
+
+    assert!(content.contains("秋风萧瑟"), "Should extract novel content");
+    assert!(content.contains("名震天下"), "Should extract all paragraphs");
+    assert!(!content.contains("Contact"), "Should filter short nav lines");
+    assert!(!content.contains("cookie"), "Should filter cookie notices");
+    println!("  HTML parsing test passed — extracted {} chars", content.len());
+}
+
+#[test]
+fn test_html_parsing_handles_empty() {
+    let html = "<html><head></head><body></body></html>";
+    let raw = regex::Regex::new(r"<[^>]*>").unwrap().replace_all(html, "");
+    let lines: Vec<&str> = raw.lines().map(|l| l.trim()).filter(|l| l.len() > 40).collect();
+    assert!(lines.is_empty(), "Empty page should produce no content lines");
+    println!("  Empty HTML test passed");
+}
+
+#[test]
+fn test_html_tag_stripping() {
+    let re = regex::Regex::new(r"<[^>]*>").unwrap();
+    let result = re.replace_all("<p>Hello</p>", "");
+    assert!(result.contains("Hello"));
+    println!("  HTML tag stripping works");
+}
