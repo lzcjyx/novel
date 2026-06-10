@@ -1,52 +1,33 @@
-# 故障排除指南
+# AI 小说工厂故障排除指南
 
-## 常见问题
+本指南适用于当前 Tauri + React + Rust + SQLite 桌面版。
 
-### 1. "schema not initialized" 错误
+## Dashboard 无法生成章节
 
-**症状**：Workflow 01 在 Check Schema Ready 节点处停止。
+**症状**：点击 `Write With Controls` 后返回 `No chapter plans available` 或 `No planned chapter found`。
 
-**解决**：
-```bash
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/000_neon_setup.sql
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/001_init_schema.sql
-psql "$NEON_DATABASE_URL_DIRECT" -f sql/002_pgvector_indexes.sql
-```
+**处理**：
+- 先在 Dashboard 运行 `Generate Weekly Plan`。
+- 到 Plans 页面确认至少有一条 `status = planned` 的章节计划。
+- 如果某条计划误停在 `in_progress` 且没有生成章节，可按 `docs/operations.md` 的失败恢复 SQL 改回 `planned`。
 
-### 2. n8n 连接 Neon 失败
+## 生成任务一直显示运行中
 
-**症状**：Postgres 节点报错 `connection refused` 或 `SSL error`。
+**症状**：Dashboard 显示 RUNNING，但日志和 pipeline 不再变化。
 
-**检查清单**：
-- [ ] Host 使用的是 Pooled host（含 `-pooler`）。
-- [ ] SSL 设置为 **Require**。
-- [ ] Port 是 `5432`。
-- [ ] Database 名称正确（默认 `novel_factory`）。
-- [ ] IP 白名单：Neon 需要将 n8n 服务器 IP 加入 allowlist（Neon Console → Settings → IP Allow）。
+**处理**：
+- 先重启应用。
+- 如果仍显示运行中，点击 `Reset Stuck Job`。
+- 如果数据库中存在未结束 job，确认没有真实生成任务后将 job 标成 `failed`。
 
-### 3. writer-service 返回 401 Unauthorized
+## 一天内重复生成被拦截
 
-**症状**：所有 writer-service 请求返回 401。
+**症状**：返回 `Already generated a chapter today. Use force=true to override.`。
 
-**解决**：
-- 检查 `WRITER_SERVICE_TOKEN` 是否在 `.env` 和 n8n environment variables 中一致。
-- 检查 n8n HTTP Request 节点是否使用了正确的 Header Auth credential。
+**说明**：Dashboard 的 `Write With Controls` 会用 `force=true` 立即写下一章；底层流水线仍会用 `generation_jobs(project_id, chapter_plan_id, job_date)` 保持幂等，避免同一计划同一天产生多个 job。
 
-### 4. writer-service 超时
+检查：
 
-**症状**：writer-service 请求 600 秒后超时，Claude Code 未完成。
-
-**解决**：
-- 增加 `CLAUDE_CODE_TIMEOUT_MS`（例如 900000 = 15 分钟）。
-- 减少 `CLAUDE_CODE_MAX_TURNS`（例如 2）。
-- 检查 Claude Code CLI 是否已安装并在 PATH 中。
-- 检查 `ANTHROPIC_API_KEY` 是否有效。
-
-### 5. 章节重复生成（幂等失效）
-
-**症状**：同一章节在同一天被生成多次。
-
-**检查**：
 ```sql
 SELECT project_id, chapter_plan_id, job_date, COUNT(*) AS cnt
 FROM generation_jobs
@@ -54,101 +35,92 @@ GROUP BY project_id, chapter_plan_id, job_date
 HAVING COUNT(*) > 1;
 ```
 
-**解决**：
-- 确认 `generation_jobs` 表有 `UNIQUE(project_id, chapter_plan_id, job_date)` 约束。
-- 确认 n8n 工作流中 `Acquire Lock` 节点使用了 `ON CONFLICT DO NOTHING RETURNING id`。
-- 删除重复记录，保留最早的一条。
+## Context Preview 为空
 
-### 6. 章节重复发布（博客重复文章）
+**症状**：`Context Preview` 显示 `No context loaded` 或错误。
 
-**症状**：同一章在博客上有多个文章。
+**处理**：
+- 确认已经选择项目。
+- 确认存在 `planned` 章节计划。
+- 如果 Bible 为空，先创建项目或补充 Bible。
+- 如果学习条目为空，到 Learn 页面导入样章；这不会阻塞生成，但会降低风格约束。
 
-**检查**：
+## 上下文不连贯
+
+**检查顺序**：
+- Chapters 页面最近 1 到 2 章是否有最终正文。
+- 最近章节 `summary` 是否为空或失真。
+- Bible 页面人物状态、伏笔、时间线是否过期。
+- Settings 里的 Embedding Provider 是否开启；RAG 为 OFF 时只能使用结构化 canon 和最近正文。
+
+生成时 draft prompt 会注入 `writing_context`，包含最近摘要、最近正文片段、上一章结尾钩子、canon、学习条目和 Dashboard 控制参数。
+
+## 文风仍然俗套
+
+**处理**：
+- 在 `Chapter Controls` 的 `禁止动作` 中明确列出本书要禁的桥段和高频词。
+- 在 `风格重点` 中写具体写法，不要只写“高级”“细腻”。
+- 到 Learn 页面导入 2 到 5 段目标风格样章。
+- 生成后在 Reviews 中查看 style/pacing 相关意见，再把反复出现的问题加入学习库。
+
+## prompt 渲染失败
+
+**症状**：错误里出现 `Unresolved placeholders`。
+
+**原因**：某个 prompt 模板新增了 `{{PLACEHOLDER}}`，但代码没有提供变量。
+
+**处理**：
+- 检查对应 `tauri-app/src-tauri/prompts/*.md` 模板。
+- 确认调用处使用 strict renderer 并传入所有变量。
+- 不要让裸 `{{...}}` 进入模型调用。
+
+## RAG 向量检索无结果
+
+**处理**：
+- Settings 中配置 Embedding Provider 和 API Key。
+- 点击测试，确保 embedding API 可用。
+- 修改 Bible 后重建索引。
+- 如果仍为空，检查 `vector_document_metadata` 是否有当前项目数据。
+
 ```sql
-SELECT project_id, chapter_id, COUNT(*) AS cnt
-FROM blog_posts
-GROUP BY project_id, chapter_id
-HAVING COUNT(*) > 1;
+SELECT source_type, COUNT(*) AS cnt
+FROM vector_document_metadata
+WHERE project_id = 'PROJECT_ID'
+GROUP BY source_type;
 ```
 
-**解决**：
-- 确认 `blog_posts` 表有 `UNIQUE(project_id, chapter_id)` 约束。
-- 手动删除重复的博客文章。
-- 保留一条 `blog_posts` 记录。
+## 章节生成成功但计划未完成
 
-### 7. 审稿 Agent 返回非 JSON
+当前流水线在成功导出并更新 canon 后会调用 `mark_chapter_plan_completed`。如果状态异常，检查是否在 `update_canon` 前失败：
 
-**症状**：`Collect All Reviews` 节点解析失败。
-
-**解决**：
-- 确保所有审稿 Agent 的 API 调用使用了 `"response_format": { "type": "json_object" }`。
-- 检查模型是否支持 JSON mode（GPT-4o、GPT-4 Turbo 支持）。
-- 如果使用 Claude API，在 system prompt 中明确要求 JSON 输出。
-
-### 8. embedding 维度不匹配
-
-**症状**：向量检索报错或返回空结果。
-
-**检查**：
 ```sql
-SELECT attname, atttypid::regtype
-FROM pg_attribute
-WHERE attrelid = 'vector_documents'::regclass
-  AND attname = 'embedding';
+SELECT cp.id, cp.sequence, cp.status, gj.status AS job_status, gj.error_message
+FROM chapter_plans cp
+LEFT JOIN generation_jobs gj ON gj.chapter_plan_id = cp.id
+WHERE cp.project_id = 'PROJECT_ID'
+ORDER BY cp.sequence;
 ```
 
-**解决**：
-- 确认 `EMBEDDING_DIMENSION` 和 `EMBEDDING_MODEL` 一致：
-  - `text-embedding-3-small` → 1536
-  - `text-embedding-3-large` → 3072
-  - `text-embedding-ada-002` → 1536
+## 前端构建失败
 
-### 9. pgvector HNSW 索引不可用
+运行：
 
-**症状**：创建索引时报错 `access method "hnsw" does not exist`。
+```bash
+cd tauri-app
+npm run build
+```
 
-**解决**：
-- 检查 pgvector 版本：`SELECT extversion FROM pg_extension WHERE extname = 'vector';`
-- HNSW 需要 pgvector >= 0.5.0。
-- Neon 默认支持 HNSW。
-- 如果 HNSW 不可用，使用 IVFFlat 代替（参考 `sql/002_pgvector_indexes.sql` 中的备选方案）。
+常见原因：
+- Tauri invoke 参数名和 Rust command 参数不一致。
+- TypeScript interface 漏了新增字段。
+- JSX 标签未闭合。
 
-### 10. Workflow 执行顺序问题
+## Rust 测试失败
 
-**症状**：Workflow 3 在 Workflow 5 之前运行，没有章节计划可用。
+运行：
 
-**解决**：
-- 确保 Workflow 5（Weekly Arc Planner）在 Workflow 3（Daily Chapter Production）之前运行。
-- 首次运行时，先手动运行 Workflow 5 生成首批章节计划。
-- 或手动插入几条 `chapter_plans`：
-  ```sql
-  INSERT INTO chapter_plans (project_id, sequence, title, plot_goals, target_word_count)
-  VALUES
-    ('PROJECT_ID', 1, '第一章', ARRAY['建立主角身份', '引入世界观', '设置第一个冲突'], 3000),
-    ('PROJECT_ID', 2, '第二章', ARRAY['推进冲突', '展示力量体系', '引入关键配角'], 3000);
-  ```
+```bash
+cargo test --manifest-path tauri-app/src-tauri/Cargo.toml
+```
 
-### 11. writer-service 并发耗尽
-
-**症状**：返回 503 "Max concurrency reached"。
-
-**解决**：
-- 增加 `WRITER_SERVICE_MAX_CONCURRENT`。
-- 确保多个小说项目错开 Schedule Trigger 时间。
-- 检查是否有卡住的 Claude Code 进程：`ps aux | grep claude`。
-
-### 12. Neon connection pooling 问题
-
-**症状**：`remaining connection slots are reserved for non-replication superuser connections`。
-
-**解决**：
-- 使用 Pooled connection（含 `-pooler` 的 host）。
-- 不要在 n8n 中使用 Direct connection 进行大量查询。
-- 减少同时运行的 n8n 工作流实例数。
-
-### 获取更多帮助
-
-1. 检查 `generation_jobs` 中的 `error_message`、`stderr`、`exit_code` 字段。
-2. 检查 n8n 工作流执行历史（Workflow → Executions）。
-3. 检查 writer-service 日志（stdout）。
-4. 检查 Neon 控制台的 Query Monitor 和 Connection Pooling 状态。
+重点关注 `core_writing_loop_tests`。这些测试覆盖 strict prompt rendering、weekly planner prompt、学习条目使用、writing context package、job 幂等、章节计划完成和核心生成流水线。

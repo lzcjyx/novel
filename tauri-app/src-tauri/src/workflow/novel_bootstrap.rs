@@ -1,12 +1,18 @@
-use tokio::sync::mpsc;
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
 use crate::db::projects;
 use crate::models::*;
 use crate::prompts;
+use crate::workflow::prompt_rendering;
+use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 fn log(log_tx: &mpsc::Sender<String>, msg: &str) {
-    let _ = log_tx.try_send(format!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), msg));
+    let _ = log_tx.try_send(format!(
+        "[{}] {}",
+        chrono::Local::now().format("%H:%M:%S"),
+        msg
+    ));
 }
 
 pub async fn bootstrap_novel(
@@ -15,15 +21,23 @@ pub async fn bootstrap_novel(
     input: &CreateProjectInput,
     log_tx: &mpsc::Sender<String>,
 ) -> Result<Project, String> {
-    log(log_tx, &format!("=== Bootstrapping Novel: {} ===", input.name));
+    log(
+        log_tx,
+        &format!("=== Bootstrapping Novel: {} ===", input.name),
+    );
 
     // 1. Create project
     let project = projects::create_project(
-        db, &input.name, input.description.as_deref(),
-        input.genre.as_deref(), input.sub_genre.as_deref(),
-        input.target_audience.as_deref(), input.tone.as_deref(),
+        db,
+        &input.name,
+        input.description.as_deref(),
+        input.genre.as_deref(),
+        input.sub_genre.as_deref(),
+        input.target_audience.as_deref(),
+        input.tone.as_deref(),
         input.style_profile_desc.as_deref(),
-        input.target_total_words, input.daily_target_words,
+        input.target_total_words,
+        input.daily_target_words,
     )?;
     log(log_tx, &format!("Project created: {}", &project.id[..8]));
 
@@ -45,6 +59,12 @@ pub async fn bootstrap_novel(
         "tone": input.tone,
         "style_description": input.style_profile_desc,
     });
+    let vars = HashMap::from([(
+        "PROJECT_INPUT_JSON",
+        serde_json::to_string_pretty(&user_input).unwrap_or_default(),
+    )]);
+    let bible_prompt =
+        prompt_rendering::render_prompt_strict("bible_generation", &bible_prompt, &vars)?;
 
     let bible_schema = serde_json::json!({
         "type": "object",
@@ -63,12 +83,15 @@ pub async fn bootstrap_novel(
     });
 
     log(log_tx, "Generating bible via AI...");
-    let bible = match provider.generate_json(
-        &bible_prompt,
-        &serde_json::to_string_pretty(&user_input).unwrap_or_default(),
-        &bible_schema,
-        32768,
-    ).await {
+    let bible = match provider
+        .generate_json(
+            &bible_prompt,
+            "请根据 system prompt 中的项目信息生成小说圣经，只输出 JSON。",
+            &bible_schema,
+            32768,
+        )
+        .await
+    {
         Ok(b) => {
             log(log_tx, "Bible generated");
             b
@@ -89,69 +112,154 @@ pub async fn bootstrap_novel(
     Ok(project)
 }
 
-async fn embed_and_index_bible(
-    db: &Database, provider: &dyn ModelClient,
-    project_id: &str, log_tx: &mpsc::Sender<String>,
+pub async fn embed_and_index_bible(
+    db: &Database,
+    provider: &dyn ModelClient,
+    project_id: &str,
+    log_tx: &mpsc::Sender<String>,
 ) {
     let bible_data = match crate::db::bible::get_bible(db, project_id) {
         Ok(b) => b,
-        Err(e) => { log(log_tx, &format!("Vector indexing skipped: {}", e)); return; }
+        Err(e) => {
+            log(log_tx, &format!("Vector indexing skipped: {}", e));
+            return;
+        }
     };
 
-    let mut texts: Vec<(String, &str, Option<String>, String)> = Vec::new();
+    let mut candidates: Vec<crate::db::vector_store::VectorIndexCandidate> = Vec::new();
     for c in &bible_data.characters {
-        let content = format!("角色: {}\n性格: {}\n动机: {}\n说话风格: {}\n外貌: {}\n背景: {}",
+        let content = format!(
+            "角色: {}\n性格: {}\n动机: {}\n说话风格: {}\n外貌: {}\n背景: {}",
             c.name,
             c.personality.as_deref().unwrap_or_default(),
             c.motivation.as_deref().unwrap_or_default(),
             c.speech_style.as_deref().unwrap_or_default(),
             c.appearance.as_deref().unwrap_or_default(),
-            c.backstory.as_deref().unwrap_or_default());
-        texts.push((c.id.clone(), "character", None, content));
+            c.backstory.as_deref().unwrap_or_default()
+        );
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &c.id,
+            "character",
+            title,
+            content,
+            "{}",
+        ));
     }
     for l in &bible_data.locations {
-        texts.push((l.id.clone(), "location", None, l.description.as_deref().unwrap_or_default().to_string()));
+        let content = l.description.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &l.id, "location", title, content, "{}",
+        ));
     }
     for l in &bible_data.world_lore {
-        texts.push((l.id.clone(), "world_lore", None, l.content.as_deref().unwrap_or_default().to_string()));
+        let content = l.content.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &l.id,
+            "world_lore",
+            title,
+            content,
+            "{}",
+        ));
     }
     for r in &bible_data.canon_rules {
-        texts.push((r.id.clone(), "canon_rule", None, r.rule_text.as_deref().unwrap_or_default().to_string()));
+        let content = r.rule_text.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &r.id,
+            "canon_rule",
+            title,
+            content,
+            "{}",
+        ));
     }
     for pt in &bible_data.plot_threads {
-        texts.push((pt.id.clone(), "plot_thread", None, pt.description.as_deref().unwrap_or_default().to_string()));
+        let content = pt.description.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &pt.id,
+            "plot_thread",
+            title,
+            content,
+            "{}",
+        ));
     }
 
-    if texts.is_empty() { return; }
+    if candidates.is_empty() {
+        return;
+    }
 
-    let text_contents: Vec<String> = texts.iter().map(|(_, _, _, c)| c.clone()).collect();
+    let candidate_count = candidates.len();
+    let pending =
+        match crate::db::vector_store::filter_vector_index_candidates(db, project_id, candidates) {
+            Ok(pending) => pending,
+            Err(e) => {
+                log(log_tx, &format!("Vector indexing skipped: {}", e));
+                return;
+            }
+        };
+    let skipped = candidate_count.saturating_sub(pending.len());
+    if pending.is_empty() {
+        log(
+            log_tx,
+            &format!("Vector index: all {} documents up to date", skipped),
+        );
+        return;
+    }
+
+    let text_contents: Vec<String> = pending
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect();
     match provider.embed(&text_contents).await {
         Ok(embeddings) => {
             let mut inserted = 0;
-            for (i, (source_id, source_type, _, content)) in texts.iter().enumerate() {
+            for (i, candidate) in pending.iter().enumerate() {
                 if i < embeddings.len() {
-                    let title = content.chars().take(40).collect::<String>();
                     let _ = crate::db::vector_store::insert_vector_document(
-                        db, project_id, source_type, Some(source_id),
-                        &title, content, "{}", &embeddings[i],
+                        db,
+                        project_id,
+                        &candidate.source_type,
+                        Some(&candidate.source_id),
+                        &candidate.title,
+                        &candidate.content,
+                        &candidate.metadata,
+                        &embeddings[i],
                     );
                     inserted += 1;
                 }
             }
-            log(log_tx, &format!("Vector index: {} documents embedded", inserted));
+            log(
+                log_tx,
+                &format!(
+                    "Vector index: {} documents embedded, {} unchanged skipped",
+                    inserted, skipped
+                ),
+            );
         }
-        Err(e) => { log(log_tx, &format!("Vector indexing unavailable: {}", e)); }
+        Err(e) => {
+            log(log_tx, &format!("Vector indexing unavailable: {}", e));
+        }
     }
 }
 
-fn insert_bible_records(db: &Database, project_id: &str, bible: &serde_json::Value, log_tx: &mpsc::Sender<String>) -> Result<(), String> {
+fn insert_bible_records(
+    db: &Database,
+    project_id: &str,
+    bible: &serde_json::Value,
+    log_tx: &mpsc::Sender<String>,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
 
     // Style guide — serialize the full object into style_text
     if let Some(sg) = bible.get("style_guide") {
         let id = Database::new_uuid();
         let style_text = sg.to_string(); // entire JSON object as style_text
-        let name = sg.get("tone").and_then(|v| v.as_str())
+        let name = sg
+            .get("tone")
+            .and_then(|v| v.as_str())
             .map(|t| format!("{} Style", t))
             .unwrap_or_else(|| "Default Style Guide".into());
         let _ = conn.execute(
@@ -236,7 +344,10 @@ fn insert_bible_records(db: &Database, project_id: &str, bible: &serde_json::Val
             let rules = ps.get("rules").and_then(|v| v.as_str()).unwrap_or("");
             let limits = ps.get("limitations").and_then(|v| v.as_str()).unwrap_or("");
             let progression = ps.get("progression").and_then(|v| v.as_str()).unwrap_or("");
-            let full_desc = format!("{}\n\nRules: {}\n\nLimitations: {}\n\nProgression: {}", desc, rules, limits, progression);
+            let full_desc = format!(
+                "{}\n\nRules: {}\n\nLimitations: {}\n\nProgression: {}",
+                desc, rules, limits, progression
+            );
             let _ = conn.execute(
                 "INSERT OR IGNORE INTO magic_or_power_systems (id, project_id, name, description, rules, limitations, progression) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![id, project_id, name, desc, rules, limits, progression],
@@ -256,7 +367,10 @@ fn insert_bible_records(db: &Database, project_id: &str, bible: &serde_json::Val
             let id = Database::new_uuid();
             let rule_type = rule.get("rule_type").and_then(|v| v.as_str()).unwrap_or("");
             let rule_text = rule.get("rule_text").and_then(|v| v.as_str()).unwrap_or("");
-            let severity = rule.get("severity").and_then(|v| v.as_str()).unwrap_or("hard");
+            let severity = rule
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("hard");
             let _ = conn.execute(
                 "INSERT OR IGNORE INTO canon_rules (id, project_id, rule_type, rule_text, severity, locked) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
                 rusqlite::params![id, project_id, rule_type, rule_text, severity],
@@ -269,8 +383,14 @@ fn insert_bible_records(db: &Database, project_id: &str, bible: &serde_json::Val
     if let Some(arr) = bible["main_plot_threads"].as_array() {
         for (_i, thread) in arr.iter().enumerate() {
             let id = Database::new_uuid();
-            let name = thread.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled");
-            let desc = thread.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let name = thread
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled");
+            let desc = thread
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let priority = thread.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
             let _ = conn.execute(
                 "INSERT OR IGNORE INTO plot_threads (id, project_id, name, description, priority, arc_status) VALUES (?1, ?2, ?3, ?4, ?5, 'open')",

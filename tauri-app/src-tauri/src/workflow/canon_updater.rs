@@ -1,7 +1,9 @@
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
-use crate::db::chapters;
+use crate::db::{bible, chapters};
 use crate::prompts;
+use crate::workflow::prompt_rendering;
+use std::collections::{HashMap, HashSet};
 
 pub async fn update_canon_after_chapter(
     db: &Database,
@@ -12,14 +14,12 @@ pub async fn update_canon_after_chapter(
 ) -> Result<(), String> {
     let chapter = chapters::get_chapter(db, chapter_id)?;
     let canon_template = prompts::load_prompt("canon_extractor")?;
-
-    let context = serde_json::json!({
-        "chapter": {
-            "title": chapter.title,
-            "sequence": chapter.sequence,
-            "content": chapter_draft["body_markdown"].as_str().unwrap_or(""),
-            "summary": chapter_draft["summary"].as_str().unwrap_or(""),
-        },
+    let existing_canon = bible::get_bible(db, project_id)?;
+    let chapter_text = serde_json::json!({
+        "title": chapter_draft["title"].as_str().or(chapter.title.as_deref()).unwrap_or(""),
+        "sequence": chapter.sequence,
+        "body_markdown": chapter_draft["body_markdown"].as_str().unwrap_or(""),
+        "summary": chapter_draft["summary"].as_str().unwrap_or(""),
         "major_events": chapter_draft.get("major_events"),
         "character_state_changes": chapter_draft.get("character_state_changes"),
         "timeline_events": chapter_draft.get("timeline_events"),
@@ -27,6 +27,20 @@ pub async fn update_canon_after_chapter(
         "foreshadowing_planted": chapter_draft.get("foreshadowing_planted"),
         "new_canon_candidates": chapter_draft.get("new_canon_candidates"),
     });
+    let vars = HashMap::from([
+        ("PROJECT_ID", project_id.to_string()),
+        ("CHAPTER_ID", chapter_id.to_string()),
+        (
+            "CHAPTER_TEXT",
+            serde_json::to_string_pretty(&chapter_text).unwrap_or_default(),
+        ),
+        (
+            "EXISTING_CANON_JSON",
+            serde_json::to_string_pretty(&existing_canon).unwrap_or_default(),
+        ),
+    ]);
+    let canon_prompt =
+        prompt_rendering::render_prompt_strict("canon_extractor", &canon_template, &vars)?;
 
     let schema = serde_json::json!({
         "type": "object",
@@ -37,12 +51,21 @@ pub async fn update_canon_after_chapter(
             "new_lore": {"type": "array"},
             "foreshadowing_updates": {"type": "array"},
             "vector_documents": {"type": "array"},
+            "knowledge_graph_edges": {"type": "array"},
             "human_review_required": {"type": "array"}
         }
     });
 
     // Try to extract canon, but don't block on failure
-    match provider.generate_json(&canon_template, &serde_json::to_string(&context).unwrap_or_default(), &schema, 8192).await {
+    match provider
+        .generate_json(
+            &canon_prompt,
+            "请从已完成章节中提取 canon 更新，只输出 JSON。",
+            &schema,
+            8192,
+        )
+        .await
+    {
         Ok(extracted) => {
             let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
 
@@ -118,10 +141,89 @@ pub async fn update_canon_after_chapter(
             }
 
             drop(conn);
+            persist_ai_inferred_graph_edges(db, project_id, &extracted)?;
         }
         Err(e) => {
             // Canon extraction is non-blocking
             log::warn!("Canon extraction failed (non-blocking): {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_ai_inferred_graph_edges(
+    db: &Database,
+    project_id: &str,
+    extracted: &serde_json::Value,
+) -> Result<(), String> {
+    let Some(edges) = extracted
+        .get("knowledge_graph_edges")
+        .and_then(|value| value.as_array())
+    else {
+        return Ok(());
+    };
+    if edges.is_empty() {
+        return Ok(());
+    }
+
+    let snapshot = crate::db::knowledge_graph::get_snapshot(db, project_id)?;
+    let valid_nodes = snapshot
+        .nodes
+        .iter()
+        .map(|node| format!("{}:{}", node.node_type, node.id))
+        .collect::<HashSet<_>>();
+
+    for edge in edges {
+        let source_id = edge
+            .get("source_node_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let source_type = edge
+            .get("source_node_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let target_id = edge
+            .get("target_node_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let target_type = edge
+            .get("target_node_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        let edge_type = edge
+            .get("edge_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim();
+        if !valid_nodes.contains(&format!("{}:{}", source_type, source_id))
+            || !valid_nodes.contains(&format!("{}:{}", target_type, target_id))
+        {
+            continue;
+        }
+
+        let confidence = edge
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.7);
+        let description = edge.get("description").and_then(|value| value.as_str());
+        if let Err(err) = crate::db::knowledge_graph::insert_edge(
+            db,
+            project_id,
+            source_id,
+            source_type,
+            target_id,
+            target_type,
+            edge_type,
+            description,
+            true,
+            confidence,
+        ) {
+            log::warn!("Skipping inferred knowledge graph edge: {}", err);
         }
     }
 

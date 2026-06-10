@@ -8,13 +8,34 @@ interface Chapter { id: string; project_id: string; chapter_plan_id?: string; se
 interface ChapterPlan { id: string; sequence: number; title?: string; outline?: string; target_word_count?: number; status: string; }
 interface ChapterVersion { id: string; chapter_id: string; version_number: number; version_type: string; title?: string; body_markdown?: string; word_count?: number; }
 interface AgentReview { id: string; agent_name: string; score?: number; pass?: boolean; blocking_issues: string; minor_issues: string; recommendations: string; }
+interface CanonPrecheckIssue { rule_type?: string; severity?: string; message?: string; evidence?: string; }
 interface ReviewScores { average_score?: number; final_score?: number; decision?: string; publish_allowed: boolean; blocking_issue_count: number; }
-interface GenerationJob { id: string; chapter_plan_id: string; job_date: string; status: string; started_at: string; completed_at?: string; error_message?: string; }
+interface AgentQualityScore { agent_name: string; review_count: number; average_score?: number; pass_rate?: number; blocking_issue_count: number; }
+interface ProjectQualitySummary { project_id: string; reviewed_chapter_count: number; publish_ready_count: number; revise_count: number; needs_human_review_count: number; average_score?: number; average_final_score?: number; total_blocking_issues: number; latest_decision?: string; latest_final_score?: number; agent_scores: AgentQualityScore[]; }
+interface GenerationJob { id: string; chapter_plan_id: string; job_date: string; status: string; started_at: string; completed_at?: string; error_message?: string; retry_count: number; metadata: string; }
+interface JobPhaseEvent { step: string; status: string; detail?: string; progress_pct: number; elapsed_ms: number; duration_ms?: number; timestamp: string; }
+interface PipelineStep { step: string; status: string; detail?: string; progress_pct: number; timestamp: string; preview_title?: string; preview_text?: string; preview_kind?: string; }
+interface JobPhaseSummary { phase_count?: number; last_step?: string; last_status?: string; last_detail?: string; failure_reason?: string; completed_at?: string; total_elapsed_ms?: number; slow_phase_threshold_ms?: number; slowest_step?: string; slowest_duration_ms?: number; slow_step_count?: number; slow_steps?: JobPhaseEvent[]; updated_at?: string; }
+interface JobModelUsageEvent { phase: string; provider: string; model: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; estimated_cost_usd?: number | null; timestamp: string; }
+interface JobUsageSummary { call_count?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; estimated_cost_usd?: number | null; updated_at?: string; }
+interface JobMetadata { phase_events?: JobPhaseEvent[]; phase_summary?: JobPhaseSummary; model_usage_events?: JobModelUsageEvent[]; usage_summary?: JobUsageSummary; }
 interface GenerationResult { ok: boolean; message: string; chapter_id?: string; chapter_title?: string; sequence?: number; word_count?: number; final_score?: number; decision?: string; }
 interface StatusResponse { ok: boolean; novel?: { name: string; genre?: string; }; slug?: string; chapter_count?: number; chapters_today?: number; plans_left?: number; total_words?: number; is_running: boolean; }
 interface BibleData { characters: any[]; locations: any[]; organizations: any[]; items: any[]; world_lore: any[]; magic_systems: any[]; canon_rules: any[]; plot_threads: any[]; foreshadowing: any[]; style_guides: any[]; timeline_events: any[]; }
-interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; }
+interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; }
 interface Project { id: string; name: string; }
+interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; }
+interface RetrievalSource { rank: number; document_id: string; source_type: string; source_id?: string; title?: string; excerpt: string; similarity?: number; relevance_label: string; metadata: string; }
+interface RetrievalTrace { source_count: number; best_similarity?: number; sources: RetrievalSource[]; }
+interface GraphContextNode { id: string; node_type: string; label: string; }
+interface GraphContextNeighbor { id: string; node_type: string; label: string; edge_type: string; direction: string; depth?: number; via_id: string; via_type: string; via_label: string; description?: string; }
+interface GraphContext { seeds: GraphContextNode[]; neighbors: GraphContextNeighbor[]; source_keys: string[]; summary: string; }
+interface WritingContextPreview { project?: any; chapter_plan?: any; continuity?: any; canon?: any; graph_context?: GraphContext; retrieval?: any[]; retrieval_trace?: RetrievalTrace; style?: any; learned_patterns?: any[]; operator_controls?: OperatorControls; }
+interface KnowledgeGraphNode { id: string; node_type: string; label: string; subtitle?: string; description?: string; status: string; degree: number; }
+interface KnowledgeGraphEdge { id: string; source_node_id: string; source_node_type: string; target_node_id: string; target_node_type: string; edge_type: string; description?: string; auto_inferred: boolean; confidence: number; }
+interface KnowledgeGraphSnapshot { nodes: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[]; orphan_count: number; }
+interface KnowledgeGraphRetrievalHints { source_key: string; connected_source_keys: string[]; query_terms: string[]; }
+interface KnowledgeGraphNeighborhood { center: KnowledgeGraphNode; neighbors: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[]; retrieval_hints: KnowledgeGraphRetrievalHints; }
 
 // ---- Context ----
 interface AppContextType {
@@ -59,25 +80,47 @@ function App() {
 
   useEffect(() => { loadProjects(); refreshSettings(); loadLogs(); }, []);
   useEffect(() => { if (selected) loadStatus(); const t = setInterval(() => { if (selected) loadStatus(); loadLogs(); }, 10000); return () => clearInterval(t); }, [selected]);
+  useEffect(() => {
+    const refreshAfterResume = () => {
+      loadProjects();
+      if (selected) loadStatus();
+      loadLogs();
+    };
+    const handleVisibility = () => {
+      if (!document.hidden) refreshAfterResume();
+    };
+    let unlisten: (() => void) | null = null;
+    listen("app-resume", refreshAfterResume).then((u) => { unlisten = u; });
+    window.addEventListener("focus", refreshAfterResume);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      if (unlisten) unlisten();
+      window.removeEventListener("focus", refreshAfterResume);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [selected, loadProjects, loadStatus, loadLogs]);
 
   const ctx = { projects, selected, setSelected, settings, refreshSettings, status, logs, loading, setLoading, msg, setMsg };
 
-  // Pre-render all pages, show/hide with CSS to preserve state across tab switches
-  const pageComponents: Record<string, React.ReactNode> = {
-    dashboard: <Dashboard />,
-    projects: <ProjectList refresh={loadProjects} />,
-    chapters: <Chapters />,
-    plans: <ChapterPlans />,
-    reviews: <ReviewPage />,
-    jobs: <JobsPage />,
-    bible: <BiblePage />,
-    settings: <SettingsPage refreshSettings={refreshSettings} />,
-    learn: <LearnPage />,
-  };
-
   const navLabels: Record<string, string> = {
     dashboard: "Dashboard", projects: "Projects", chapters: "Chapters",
-    plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", learn: "Learn", settings: "Settings",
+    plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", graph: "Graph", learn: "Learn", settings: "Settings",
+  };
+
+  const renderPage = () => {
+    switch (page) {
+      case "dashboard": return <Dashboard />;
+      case "projects": return <ProjectList refresh={loadProjects} />;
+      case "chapters": return <Chapters />;
+      case "plans": return <ChapterPlans />;
+      case "reviews": return <ReviewPage />;
+      case "jobs": return <JobsPage />;
+      case "bible": return <BiblePage />;
+      case "graph": return <KnowledgeGraphPage />;
+      case "learn": return <LearnPage />;
+      case "settings": return <SettingsPage refreshSettings={refreshSettings} />;
+      default: return <Dashboard />;
+    }
   };
 
   return (
@@ -96,9 +139,7 @@ function App() {
           </select>
         </div>
         <main className="app-main">
-          {Object.entries(pageComponents).map(([key, component]) => (
-            <div key={key} style={{ display: page === key ? "block" : "none" }}>{component}</div>
-          ))}
+          {renderPage()}
         </main>
       </div>
     </Ctx.Provider>
@@ -108,16 +149,33 @@ function App() {
 // ---- Dashboard ----
 function Dashboard() {
   const { status, loading, selected, settings, logs, msg, setLoading, setMsg } = useApp();
-  const [pipelineSteps, setPipelineSteps] = useState<Array<{step:string,status:string,detail?:string,progress_pct:number,timestamp:string}>>([]);
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStep[]>([]);
   const [progress, setProgress] = useState("");
+  const [livePreview, setLivePreview] = useState<{title:string;text:string;kind:string} | null>(null);
+  const [visiblePreview, setVisiblePreview] = useState("");
+  const [operatorControls, setOperatorControls] = useState<OperatorControls>({
+    generation_mode: "continuity_first",
+    forbidden_moves: "套路打脸、反派降智、无代价胜利、连续三段同句式开头",
+    style_emphasis: "克制、具体、少解释，用动作和物件承载情绪",
+  });
+  const [contextPreview, setContextPreview] = useState<WritingContextPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewMsg, setPreviewMsg] = useState("");
 
   // Listen for Tauri pipeline events
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen("pipeline-step", (event: any) => {
-      const ev = event.payload;
-      setPipelineSteps((prev: any) => {
-        const existing = prev.findIndex((s: any) => s.step === ev.step);
+      const ev = event.payload as PipelineStep;
+      if (ev.preview_text) {
+        setLivePreview({
+          title: ev.preview_title || "Untitled",
+          text: ev.preview_text,
+          kind: ev.preview_kind || "preview",
+        });
+      }
+      setPipelineSteps((prev) => {
+        const existing = prev.findIndex((s) => s.step === ev.step);
         if (existing >= 0) {
           const next = [...prev];
           next[existing] = ev;
@@ -133,14 +191,97 @@ function Dashboard() {
   useEffect(() => {
     if (!loading) { setProgress(""); return; }
     setPipelineSteps([]); // Clear on new run
+    setLivePreview(null);
+    setVisiblePreview("");
     setProgress("Starting...");
   }, [loading]);
+
+  useEffect(() => {
+    if (!livePreview?.text) {
+      setVisiblePreview("");
+      return;
+    }
+    let cursor = 0;
+    const chunkSize = Math.max(18, Math.ceil(livePreview.text.length / 150));
+    setVisiblePreview("");
+    const timer = window.setInterval(() => {
+      cursor = Math.min(livePreview.text.length, cursor + chunkSize);
+      setVisiblePreview(livePreview.text.slice(0, cursor));
+      if (cursor >= livePreview.text.length) {
+        window.clearInterval(timer);
+      }
+    }, 28);
+    return () => window.clearInterval(timer);
+  }, [livePreview]);
+
+  const modes = [
+    { value: "continuity_first", label: "连贯优先" },
+    { value: "suspense_push", label: "悬疑推进" },
+    { value: "character_arc", label: "人物弧光" },
+    { value: "high_pressure", label: "高压冲突" },
+  ];
+
+  const updateControl = (key: keyof OperatorControls, value: string) => {
+    setOperatorControls(prev => ({ ...prev, [key]: value }));
+  };
+
+  const controlsPayload = (): OperatorControls => ({
+    generation_mode: operatorControls.generation_mode || "continuity_first",
+    chapter_intent: operatorControls.chapter_intent?.trim() || undefined,
+    must_include_beats: operatorControls.must_include_beats?.trim() || undefined,
+    forbidden_moves: operatorControls.forbidden_moves?.trim() || undefined,
+    style_emphasis: operatorControls.style_emphasis?.trim() || undefined,
+  });
+
+  const loadPreview = async () => {
+    if (!selected) return;
+    setPreviewLoading(true);
+    setPreviewMsg("");
+    try {
+      const preview = await invoke<WritingContextPreview>("get_next_chapter_context_preview", {
+        projectId: selected,
+        operatorControls: controlsPayload(),
+      });
+      setContextPreview(preview);
+    } catch (e) {
+      setContextPreview(null);
+      setPreviewMsg("Error: " + e);
+    }
+    setPreviewLoading(false);
+  };
+
+  useEffect(() => {
+    if (selected) loadPreview();
+  }, [selected]);
+
+  useEffect(() => {
+    const refreshPreview = () => {
+      if (selected) loadPreview();
+    };
+    const handleVisibility = () => {
+      if (!document.hidden) refreshPreview();
+    };
+    let unlisten: (() => void) | null = null;
+    listen("app-resume", refreshPreview).then((u) => { unlisten = u; });
+    window.addEventListener("focus", refreshPreview);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      if (unlisten) unlisten();
+      window.removeEventListener("focus", refreshPreview);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [selected]);
 
   const handleWrite = async () => {
     setLoading(true); setMsg("");
     try {
-      const r = await invoke<GenerationResult>("generate_next_chapter", { projectId: selected, force: true });
+      const r = await invoke<GenerationResult>("generate_next_chapter", {
+        projectId: selected,
+        force: true,
+        operatorControls: controlsPayload(),
+      });
       setMsg(r.message);
+      await loadPreview();
     } catch (e) { setMsg("Error: " + e); }
     setLoading(false);
   };
@@ -150,11 +291,27 @@ function Dashboard() {
     try {
       const r = await invoke<GenerationResult>("run_weekly_arc_planner", { projectId: selected });
       setMsg(r.message);
+      await loadPreview();
     } catch (e) { setMsg("Error: " + e); }
     setLoading(false);
   };
 
   const selNovel = status?.novel;
+  const plan = contextPreview?.chapter_plan || {};
+  const continuity = contextPreview?.continuity || {};
+  const canon = contextPreview?.canon || {};
+  const learned = contextPreview?.learned_patterns || [];
+  const retrievalTrace = contextPreview?.retrieval_trace;
+  const ragSources = retrievalTrace?.sources || [];
+  const graphContext = contextPreview?.graph_context;
+  const graphNeighbors = graphContext?.neighbors || [];
+  const pipelineOrder = ["acquire_lock","load_canon","retrieve_context","generate_draft","aggregate_reviews","revise","export","update_canon","complete"];
+  const pipelineLabels: Record<string,string> = {
+    acquire_lock:"获取生成锁",load_canon:"加载圣经数据",retrieve_context:"向量检索上下文",
+    generate_draft:"AI生成初稿",aggregate_reviews:"汇总审稿意见",
+    revise:"AI修订",export:"导出Markdown",update_canon:"更新圣经",complete:"完成"
+  };
+  const latestPhase = [...pipelineSteps].reverse().find(step => !step.preview_kind);
 
   return (
     <>
@@ -182,37 +339,152 @@ function Dashboard() {
         ))}
       </div>
 
-      <div style={{ marginBottom: 16 }}>
-        <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>Write Chapter Now</button>
-        <button className="btn btn-primary" onClick={handleWeekly} disabled={loading || !selected} style={{ marginLeft: 8 }}>Generate Weekly Plan</button>
-        {(status?.is_running && !loading) && <button className="btn btn-reset" style={{ marginLeft: 8 }} onClick={async () => { await invoke("reset_running"); }}>Reset Stuck Job</button>}
+      <div className="writer-console">
+        <section className="writer-panel">
+          <div className="panel-heading">
+            <h3 className="section-title">Chapter Controls</h3>
+          </div>
+          <div className="mode-segments">
+            {modes.map(mode => (
+              <button
+                key={mode.value}
+                className={`mode-btn ${operatorControls.generation_mode === mode.value ? "active" : ""}`}
+                onClick={() => updateControl("generation_mode", mode.value)}
+                type="button"
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
+          <div className="control-grid">
+            <label className="control-field control-field-wide">
+              <span>本章意图</span>
+              <textarea value={operatorControls.chapter_intent || ""} onChange={e => updateControl("chapter_intent", e.target.value)} placeholder="例：让主角发现线索，但付出关系破裂的代价" />
+            </label>
+            <label className="control-field">
+              <span>必写节拍</span>
+              <textarea value={operatorControls.must_include_beats || ""} onChange={e => updateControl("must_include_beats", e.target.value)} placeholder="例：旧名再次出现；盟友隐瞒关键信息" />
+            </label>
+            <label className="control-field">
+              <span>禁止动作</span>
+              <textarea value={operatorControls.forbidden_moves || ""} onChange={e => updateControl("forbidden_moves", e.target.value)} />
+            </label>
+            <label className="control-field control-field-wide">
+              <span>风格重点</span>
+              <textarea value={operatorControls.style_emphasis || ""} onChange={e => updateControl("style_emphasis", e.target.value)} />
+            </label>
+          </div>
+          <div className="action-row">
+            <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>Write With Controls</button>
+            <button className="btn btn-secondary" onClick={handleWeekly} disabled={loading || !selected}>Generate Weekly Plan</button>
+            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await invoke("reset_running"); }}>Reset Stuck Job</button>}
+          </div>
+        </section>
+
+        <section className="writer-panel context-panel">
+          <div className="panel-heading">
+            <h3 className="section-title">Context Preview</h3>
+            <button className="btn btn-sm btn-secondary" onClick={loadPreview} disabled={!selected || previewLoading}>{previewLoading ? "Refreshing" : "Refresh"}</button>
+          </div>
+          {contextPreview ? (
+            <>
+              <div className="next-plan">
+                <div className="status-label">Next Chapter</div>
+                <div className="chapter-title">Ch.{plan.sequence ?? "?"} — {plan.title || "Untitled"}</div>
+                <div className="text-body">{plan.outline || "No outline"}</div>
+              </div>
+              <div className="context-stats">
+                <div><strong>{canon.characters?.length || 0}</strong><span>Characters</span></div>
+                <div><strong>{canon.active_plot_threads?.length || 0}</strong><span>Threads</span></div>
+                <div><strong>{canon.unresolved_foreshadowing?.length || 0}</strong><span>Foreshadowing</span></div>
+                <div><strong>{graphNeighbors.length}</strong><span>Graph Links</span></div>
+                <div><strong>{retrievalTrace?.source_count || 0}</strong><span>RAG Sources</span></div>
+                <div><strong>{learned.length}</strong><span>Learned</span></div>
+              </div>
+              {continuity.previous_ending_hook && (
+                <div className="context-slice">
+                  <div className="status-label">Previous Hook</div>
+                  <p>{continuity.previous_ending_hook}</p>
+                </div>
+              )}
+              {graphNeighbors.length > 0 && (
+                <div className="graph-context-strip">
+                  <div className="status-label">Graph Context</div>
+                  {graphContext?.summary && <p className="graph-context-summary">{graphContext.summary}</p>}
+                  <div className="graph-context-links">
+                    {graphNeighbors.slice(0, 6).map((neighbor, idx) => (
+                      <span key={`${neighbor.via_id}-${neighbor.id}-${idx}`}>
+                        {neighbor.via_label} / {neighbor.edge_type} / {neighbor.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {ragSources.length > 0 && (
+                <div className="rag-source-list">
+                  <div className="status-label">RAG Sources</div>
+                  {ragSources.slice(0, 5).map(source => (
+                    <div className="rag-source-row" key={source.document_id}>
+                      <div className="rag-source-rank">{source.rank}</div>
+                      <div>
+                        <div className="rag-source-title">{source.title || source.source_id || source.source_type}</div>
+                        <div className="rag-source-meta">{source.source_type}{source.source_id ? ` · ${source.source_id}` : ""}</div>
+                      </div>
+                      <div className={`rag-source-score rag-score-${source.relevance_label}`}>
+                        {source.similarity !== undefined ? source.similarity.toFixed(2) : "n/a"}
+                      </div>
+                      <p className="rag-source-excerpt">{source.excerpt}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {learned.length > 0 && (
+                <div className="learned-strip">
+                  {learned.slice(0, 6).map((entry: any) => <span key={entry.id}>{entry.pattern_name}</span>)}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className={`msg-banner ${previewMsg.startsWith("Error") ? "msg-error" : "msg-success"}`}>{previewMsg || "No context loaded"}</div>
+          )}
+        </section>
       </div>
 
-      {loading && pipelineSteps.length > 0 && (
-        <div className="card" style={{ marginTop: 16 }}>
-          <h3 className="section-title">Pipeline Progress</h3>
-          <div style={{ fontFamily: "monospace", fontSize: 12 }}>
-            {["acquire_lock","load_canon","retrieve_context","generate_draft","aggregate_reviews","revise","export","update_canon","complete"].map(step => {
+      {(loading || pipelineSteps.length > 0 || livePreview) && (
+        <section className="live-workbench">
+          <div className="live-status">
+            <div>
+              <div className="status-label">Live Writer</div>
+              <div className="live-phase">{latestPhase ? (pipelineLabels[latestPhase.step] || latestPhase.step) : (loading ? "准备生成" : "等待任务")}</div>
+            </div>
+            <div className={`live-pulse ${loading ? "active" : ""}`} />
+          </div>
+          <div className="pipeline-timeline">
+            {pipelineOrder.map(step => {
               const s = pipelineSteps.find(p => p.step === step);
               const isReview = step.startsWith("review_");
               if (isReview) return null;
-              const icons: Record<string,string> = {running:"◌",done:"✓",failed:"✗"};
-              const colors: Record<string,string> = {running:"var(--primary)",done:"var(--success)",failed:"var(--warning)"};
-              const label: Record<string,string> = {
-                acquire_lock:"获取生成锁",load_canon:"加载圣经数据",retrieve_context:"向量检索上下文",
-                generate_draft:"AI生成初稿",aggregate_reviews:"汇总审稿意见",
-                revise:"AI修订",export:"导出Markdown",update_canon:"更新圣经",complete:"完成"
-              };
               return (
-                <div key={step} style={{ padding:"3px 0", color: s ? colors[s.status]||"var(--on-dark-mute)" : "var(--on-dark-mute)" }}>
-                  {s ? (icons[s.status]||"○") : "○"} {label[step]||step}
-                  {s?.detail ? <span style={{fontSize:11,marginLeft:8,opacity:0.7}}>{s.detail}</span> : null}
+                <div key={step} className={`pipeline-tick ${s?.status || "pending"}`}>
+                  <span className="pipeline-dot" />
+                  <span>{pipelineLabels[step] || step}</span>
+                  {s?.detail ? <em>{s.detail}</em> : null}
                 </div>
               );
             })}
           </div>
-          <div style={{ marginTop: 8, fontSize: 12, color: "var(--primary)" }}>{progress}</div>
-        </div>
+          <div className="live-progress">{progress || (loading ? "Starting..." : "Idle")}</div>
+          <div className="live-writer-preview">
+            <div className="live-preview-head">
+              <span>{livePreview ? `${livePreview.kind} preview` : "Draft preview"}</span>
+              <strong>{livePreview?.title || "No preview yet"}</strong>
+            </div>
+            <div className="live-preview-body">
+              {visiblePreview || (loading ? "等待模型返回正文预览..." : "开始写作后这里会显示本章正文预览。")}
+              {loading && <span className="live-cursor" />}
+            </div>
+          </div>
+        </section>
       )}
       {msg && <div className={`msg-banner ${msg.toLowerCase().includes("error") ? "msg-error" : "msg-success"}`}>{msg}</div>}
 
@@ -449,22 +721,79 @@ function ReviewPage() {
   const [selCh, setSelCh] = useState("");
   const [reviews, setReviews] = useState<AgentReview[]>([]);
   const [scores, setScores] = useState<ReviewScores | null>(null);
+  const [qualitySummary, setQualitySummary] = useState<ProjectQualitySummary | null>(null);
 
-  useEffect(() => { if (selected) invoke<Chapter[]>("get_chapters", { projectId: selected }).then(setChapters).catch(e => console.error(e)); }, [selected]);
+  useEffect(() => {
+    if (!selected) {
+      setChapters([]);
+      setQualitySummary(null);
+      return;
+    }
+    invoke<Chapter[]>("get_chapters", { projectId: selected }).then(setChapters).catch(e => console.error(e));
+    invoke<ProjectQualitySummary>("get_project_quality_summary", { projectId: selected }).then(setQualitySummary).catch(e => console.error(e));
+  }, [selected]);
   useEffect(() => {
     if (!selCh) { setReviews([]); setScores(null); return; }
     invoke<AgentReview[]>("get_agent_reviews", { chapterId: selCh }).then(setReviews).catch(e => console.error(e));
-    invoke<ReviewScores>("get_review_scores", { chapterId: selCh }).then(setScores).catch(e => console.error(e));
+    invoke<ReviewScores | null>("get_review_scores", { chapterId: selCh }).then(setScores).catch(e => console.error(e));
   }, [selCh]);
 
   const agentNames: Record<string, string> = {
     continuity_reviewer: "Continuity", character_reviewer: "Character", plot_logic_reviewer: "Plot Logic",
     pacing_reviewer: "Pacing", style_reviewer: "Style", safety_reviewer: "Safety", publication_reviewer: "Publication",
+    canon_consistency_precheck: "Canon Precheck",
   };
+  const parseCanonIssues = (raw: string): CanonPrecheckIssue[] => {
+    try {
+      const parsed = JSON.parse(raw || "[]");
+      return Array.isArray(parsed) ? parsed.filter(issue => issue && typeof issue === "object") : [];
+    } catch {
+      return [];
+    }
+  };
+  const canonIssues = reviews
+    .filter(review => review.agent_name === "canon_consistency_precheck")
+    .flatMap(review => parseCanonIssues(review.blocking_issues));
 
   return (
     <>
       <h2 className="page-title">Review Reports</h2>
+      {qualitySummary && (
+        <section className="quality-dashboard">
+          <div className="quality-stat-grid">
+            <div><strong>{qualitySummary.reviewed_chapter_count}</strong><span>Reviewed</span></div>
+            <div><strong>{qualitySummary.average_final_score !== undefined ? qualitySummary.average_final_score.toFixed(1) : "n/a"}</strong><span>Avg Final</span></div>
+            <div><strong>{qualitySummary.publish_ready_count}</strong><span>Ready</span></div>
+            <div><strong>{qualitySummary.revise_count}</strong><span>Revise</span></div>
+            <div><strong>{qualitySummary.needs_human_review_count}</strong><span>Human Review</span></div>
+            <div><strong>{qualitySummary.total_blocking_issues}</strong><span>Blocking</span></div>
+          </div>
+          <div className="quality-summary-row">
+            <div>
+              <div className="status-label">Latest Decision</div>
+              <div className="quality-latest">{qualitySummary.latest_decision || "No reviews"}</div>
+            </div>
+            <div>
+              <div className="status-label">Latest Score</div>
+              <div className="quality-latest">{qualitySummary.latest_final_score !== undefined ? qualitySummary.latest_final_score.toFixed(0) : "n/a"}</div>
+            </div>
+          </div>
+          {qualitySummary.agent_scores.length > 0 && (
+            <div className="agent-quality-list">
+              {qualitySummary.agent_scores.map(agent => (
+                <div className="agent-quality-row" key={agent.agent_name}>
+                  <div>
+                    <div className="agent-quality-name">{agentNames[agent.agent_name] || agent.agent_name}</div>
+                    <div className="text-meta">{agent.review_count} reviews · {agent.blocking_issue_count} blocking</div>
+                  </div>
+                  <div className="agent-quality-score">{agent.average_score !== undefined ? agent.average_score.toFixed(1) : "n/a"}</div>
+                  <div className="agent-quality-pass">{agent.pass_rate !== undefined ? `${Math.round(agent.pass_rate * 100)}% pass` : "n/a"}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
       <select className="select" value={selCh} onChange={e => setSelCh(e.target.value)} style={{ marginBottom: 16 }}>
         <option value="">-- Select Chapter --</option>
         {chapters.map(c => <option key={c.id} value={c.id}>Ch.{c.sequence} — {c.title}</option>)}
@@ -477,11 +806,28 @@ function ReviewPage() {
           <div className="text-meta" style={{ marginTop: 4 }}>Decision: {scores.decision} · Avg: {scores.average_score?.toFixed(1)} · Blocking: {scores.blocking_issue_count} · Publish: {scores.publish_allowed ? "Yes" : "No"}</div>
         </div>
       )}
+      {canonIssues.length > 0 && (
+        <section className="card-feature canon-precheck-panel" style={{ marginBottom: 16 }}>
+          <h3 className="section-title" style={{ color: "var(--warning)" }}>Canon Precheck Issues</h3>
+          <div className="canon-issue-list">
+            {canonIssues.map((issue, idx) => (
+              <div className="canon-issue-row" key={`${issue.rule_type || "issue"}-${idx}`}>
+                <div className="canon-issue-head">
+                  <span className={`badge ${issue.severity === "blocking" ? "badge-warning" : "badge-active"}`}>{issue.severity || "warning"}</span>
+                  <strong>{issue.rule_type || "canon_issue"}</strong>
+                </div>
+                <div>{issue.message || "Canon consistency issue detected."}</div>
+                {issue.evidence && <div className="text-meta">Evidence: {issue.evidence}</div>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
       {reviews.map(r => (
         <div key={r.id} className="card" style={{ borderLeft: r.pass ? "3px solid var(--success)" : "3px solid var(--warning)" }}>
           <div className="chapter-title">{agentNames[r.agent_name] || r.agent_name} <span className={`badge ${(r.score || 0) >= 80 ? "badge-success" : (r.score || 0) >= 60 ? "badge-active" : "badge-warning"}`}>{r.score}</span></div>
           <div className="text-meta" style={{ marginTop: 4 }}>{r.pass ? "Pass" : "Fail"}</div>
-          {r.blocking_issues && r.blocking_issues !== "[]" && <div className="msg-banner msg-error">{r.blocking_issues.slice(0, 300)}</div>}
+          {r.agent_name !== "canon_consistency_precheck" && r.blocking_issues && r.blocking_issues !== "[]" && <div className="msg-banner msg-error">{r.blocking_issues.slice(0, 300)}</div>}
         </div>
       ))}
     </>
@@ -495,16 +841,98 @@ function JobsPage() {
   useEffect(() => { if (selected) invoke<GenerationJob[]>("get_generation_jobs", { projectId: selected }).then(setJobs).catch(e => console.error(e)); }, [selected]);
 
   const color = (s: string) => s === "completed" ? "var(--success)" : s === "failed" ? "var(--warning)" : s === "needs_human_review" ? "#f39c12" : "var(--primary)";
+  const phaseLabels: Record<string, string> = {
+    acquire_lock: "Lock",
+    load_canon: "Canon",
+    retrieve_context: "RAG",
+    generate_draft: "Draft",
+    aggregate_reviews: "Reviews",
+    revise: "Revise",
+    export: "Export",
+    update_canon: "Update Canon",
+    complete: "Complete",
+  };
+  const parseMetadata = (metadata: string): JobMetadata => {
+    try {
+      const parsed = JSON.parse(metadata || "{}");
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  };
+  const formatDuration = (ms?: number) => {
+    if (ms === undefined || Number.isNaN(ms)) return "n/a";
+    if (ms < 1000) return `${ms}ms`;
+    const seconds = ms / 1000;
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m ${(seconds % 60).toFixed(0)}s`;
+  };
+  const formatTokens = (tokens?: number) => {
+    if (tokens === undefined || Number.isNaN(tokens)) return "n/a";
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}k`;
+    return `${tokens}`;
+  };
+  const formatCost = (cost?: number | null) => {
+    if (cost === undefined || cost === null || Number.isNaN(cost)) return "n/a";
+    return `$${cost.toFixed(4)}`;
+  };
 
   return (
     <>
       <h2 className="page-title">Generation Jobs</h2>
-      {jobs.map(j => (
-        <div key={j.id} className="card">
-          <div className="chapter-title">{j.job_date} — <span style={{ color: color(j.status) }}>{j.status}</span></div>
-          <div className="text-meta">{j.started_at} · {j.completed_at ? `Done: ${j.completed_at}` : ""} · {j.error_message || ""}</div>
-        </div>
-      ))}
+      <div className="jobs-workbench">
+        {jobs.map(j => {
+          const metadata = parseMetadata(j.metadata);
+          const events = metadata.phase_events || [];
+          const summary = metadata.phase_summary || {};
+          const usage = metadata.usage_summary || {};
+          const failure = summary.failure_reason || j.error_message;
+          const slowest = summary.slowest_step
+            ? `${phaseLabels[summary.slowest_step] || summary.slowest_step} ${formatDuration(summary.slowest_duration_ms)}`
+            : "n/a";
+          return (
+            <div key={j.id} className="card job-card">
+              <div className="job-header">
+                <div>
+                  <div className="chapter-title">{j.job_date} — <span style={{ color: color(j.status) }}>{j.status}</span></div>
+                  <div className="text-meta">{j.started_at}{j.completed_at ? ` · Done: ${j.completed_at}` : ""}</div>
+                </div>
+                <div className="job-status-pill" style={{ borderColor: color(j.status), color: color(j.status) }}>{j.status}</div>
+              </div>
+              <div className="job-metric-row">
+                <div><strong>{summary.phase_count ?? events.length}</strong><span>Phases</span></div>
+                <div><strong>{formatDuration(summary.total_elapsed_ms)}</strong><span>Elapsed</span></div>
+                <div><strong>{slowest}</strong><span>Slowest</span></div>
+                <div><strong>{j.retry_count || 0}</strong><span>Retries</span></div>
+                <div><strong>{formatTokens(usage.total_tokens)}</strong><span>Tokens</span></div>
+                <div><strong>{formatCost(usage.estimated_cost_usd)}</strong><span>Cost</span></div>
+                <div><strong>{summary.last_step ? (phaseLabels[summary.last_step] || summary.last_step) : "n/a"}</strong><span>Last Step</span></div>
+              </div>
+              {failure && <div className="msg-banner msg-error job-failure">{failure}</div>}
+              {events.length > 0 ? (
+                <div className="job-timeline">
+                  {events.map((event, idx) => (
+                    <div key={`${event.step}-${idx}`} className={`job-phase job-phase-${event.status}`}>
+                      <div className="job-phase-marker">{idx + 1}</div>
+                      <div className="job-phase-main">
+                        <div className="job-phase-title">
+                          <span>{phaseLabels[event.step] || event.step}</span>
+                          <strong>{formatDuration(event.duration_ms ?? event.elapsed_ms)}</strong>
+                        </div>
+                        {event.detail && <div className="job-phase-detail">{event.detail}</div>}
+                      </div>
+                      <div className="job-phase-progress">{Math.round(event.progress_pct)}%</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-meta">No phase timeline recorded for this job.</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </>
   );
 }
@@ -603,6 +1031,298 @@ function BiblePage() {
   );
 }
 
+// ---- KnowledgeGraphPage ----
+function KnowledgeGraphPage() {
+  const { selected } = useApp();
+  const [snapshot, setSnapshot] = useState<KnowledgeGraphSnapshot | null>(null);
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [selectedNodeId, setSelectedNodeId] = useState("");
+  const [neighborhood, setNeighborhood] = useState<KnowledgeGraphNeighborhood | null>(null);
+  const [neighborhoodStatus, setNeighborhoodStatus] = useState("");
+  const [edgeForm, setEdgeForm] = useState({ sourceId: "", targetId: "", edgeType: "related_to", description: "" });
+  const [message, setMessage] = useState("");
+
+  const loadGraph = useCallback(async () => {
+    if (!selected) {
+      setSnapshot(null);
+      return;
+    }
+    try {
+      const data = await invoke<KnowledgeGraphSnapshot>("get_knowledge_graph", { projectId: selected });
+      setSnapshot(data);
+      setNeighborhood(null);
+      setMessage("");
+    } catch (e) {
+      setSnapshot(null);
+      setMessage("Error: " + e);
+    }
+  }, [selected]);
+
+  useEffect(() => { loadGraph(); }, [loadGraph]);
+
+  const nodes = snapshot?.nodes || [];
+  const edges = snapshot?.edges || [];
+  const nodeById = new Map(nodes.map(node => [node.id, node]));
+  const types = Array.from(new Set(nodes.map(node => node.node_type))).sort();
+  const typeLabel = (type: string) => type.replace(/_/g, " ");
+  const query = search.trim().toLowerCase();
+  const visibleNodes = nodes.filter(node => {
+    const matchesType = typeFilter === "all" || node.node_type === typeFilter;
+    const text = `${node.label} ${node.subtitle || ""} ${node.description || ""}`.toLowerCase();
+    return matchesType && (!query || text.includes(query));
+  });
+  const visibleIds = new Set(visibleNodes.map(node => node.id));
+  const visibleEdges = edges.filter(edge => visibleIds.has(edge.source_node_id) && visibleIds.has(edge.target_node_id));
+  const selectedNode = nodeById.get(selectedNodeId) || visibleNodes[0];
+  const selectedNodeKey = selectedNode ? `${selectedNode.node_type}:${selectedNode.id}` : "";
+  const connectedEdges = selectedNode
+    ? neighborhood?.center.id === selectedNode.id && neighborhood.center.node_type === selectedNode.node_type
+      ? neighborhood.edges
+      : edges.filter(edge => edge.source_node_id === selectedNode.id || edge.target_node_id === selectedNode.id)
+    : [];
+
+  useEffect(() => {
+    if (nodes.length >= 2 && (!edgeForm.sourceId || !nodeById.has(edgeForm.sourceId))) {
+      setEdgeForm(prev => ({ ...prev, sourceId: nodes[0].id, targetId: nodes[1].id }));
+    }
+  }, [nodes.length]);
+
+  useEffect(() => {
+    if (selectedNode && selectedNode.id !== selectedNodeId) setSelectedNodeId(selectedNode.id);
+  }, [selectedNode?.id]);
+
+  useEffect(() => {
+    if (!selected || !selectedNode) {
+      setNeighborhood(null);
+      setNeighborhoodStatus("");
+      return;
+    }
+    let cancelled = false;
+    setNeighborhoodStatus("Loading graph context...");
+    invoke<KnowledgeGraphNeighborhood>("get_knowledge_graph_neighborhood", {
+      projectId: selected,
+      nodeId: selectedNode.id,
+      nodeType: selectedNode.node_type,
+    })
+      .then(data => {
+        if (!cancelled) {
+          setNeighborhood(data);
+          setNeighborhoodStatus("");
+        }
+      })
+      .catch(e => {
+        if (!cancelled) {
+          setNeighborhood(null);
+          setNeighborhoodStatus("Error: " + e);
+        }
+      });
+    return () => { cancelled = true; };
+  }, [selected, selectedNodeKey]);
+
+  const positions = (() => {
+    const byType = new Map<string, KnowledgeGraphNode[]>();
+    for (const node of visibleNodes) {
+      byType.set(node.node_type, [...(byType.get(node.node_type) || []), node]);
+    }
+    const map = new Map<string, { x: number; y: number }>();
+    const orderedTypes = Array.from(byType.keys()).sort();
+    orderedTypes.forEach((type, typeIndex) => {
+      const group = byType.get(type) || [];
+      const radius = 18 + Math.min(typeIndex, 5) * 7;
+      group.forEach((node, index) => {
+        const angle = ((index / Math.max(group.length, 1)) * Math.PI * 2) + (typeIndex * 0.58);
+        map.set(node.id, {
+          x: 50 + Math.cos(angle) * radius,
+          y: 50 + Math.sin(angle) * Math.min(radius * 0.82, 35),
+        });
+      });
+    });
+    return map;
+  })();
+
+  const createEdge = async () => {
+    if (!selected) return;
+    const source = nodeById.get(edgeForm.sourceId);
+    const target = nodeById.get(edgeForm.targetId);
+    if (!source || !target) {
+      setMessage("Error: choose source and target nodes");
+      return;
+    }
+    try {
+      await invoke<KnowledgeGraphEdge>("create_knowledge_graph_edge", {
+        projectId: selected,
+        sourceId: source.id,
+        sourceType: source.node_type,
+        targetId: target.id,
+        targetType: target.node_type,
+        edgeType: edgeForm.edgeType.trim() || "related_to",
+        description: edgeForm.description.trim() || null,
+      });
+      setEdgeForm(prev => ({ ...prev, description: "" }));
+      await loadGraph();
+      setMessage("Edge created.");
+    } catch (e) {
+      setMessage("Error: " + e);
+    }
+  };
+
+  const deleteEdge = async (edgeId: string) => {
+    try {
+      await invoke("delete_knowledge_graph_edge", { edgeId });
+      await loadGraph();
+      setMessage("Edge deleted.");
+    } catch (e) {
+      setMessage("Error: " + e);
+    }
+  };
+
+  if (!selected) {
+    return (
+      <>
+        <h2 className="page-title">Knowledge Graph</h2>
+        <div className="text-meta">Select a project to view the knowledge graph.</div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2 className="page-title">Knowledge Graph</h2>
+      <div className="graph-workbench">
+        <div className="graph-toolbar">
+          <div className="graph-stat"><strong>{nodes.length}</strong><span>Nodes</span></div>
+          <div className="graph-stat"><strong>{edges.length}</strong><span>Edges</span></div>
+          <div className="graph-stat"><strong>{snapshot?.orphan_count ?? 0}</strong><span>Orphans</span></div>
+          <input className="text-input graph-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search canon..." />
+        </div>
+
+        <div className="graph-type-filter">
+          <button className={`tab-btn ${typeFilter === "all" ? "active" : ""}`} onClick={() => setTypeFilter("all")}>All</button>
+          {types.map(type => (
+            <button key={type} className={`tab-btn ${typeFilter === type ? "active" : ""}`} onClick={() => setTypeFilter(type)}>
+              {typeLabel(type)}
+            </button>
+          ))}
+        </div>
+
+        <div className="graph-layout">
+          <section className="graph-canvas">
+            <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
+              {visibleEdges.map(edge => {
+                const source = positions.get(edge.source_node_id);
+                const target = positions.get(edge.target_node_id);
+                if (!source || !target) return null;
+                return <line key={edge.id} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
+              })}
+            </svg>
+            {visibleNodes.map(node => {
+              const pos = positions.get(node.id) || { x: 50, y: 50 };
+              return (
+                <button
+                  key={node.id}
+                  className={`graph-node graph-node-${node.node_type} ${selectedNode?.id === node.id ? "active" : ""}`}
+                  style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
+                  onClick={() => setSelectedNodeId(node.id)}
+                  title={`${node.label} (${typeLabel(node.node_type)})`}
+                  type="button"
+                >
+                  <span>{node.label}</span>
+                  <em>{node.degree}</em>
+                </button>
+              );
+            })}
+            {visibleNodes.length === 0 && <div className="graph-empty">No matching nodes.</div>}
+          </section>
+
+          <aside className="graph-inspector">
+            {selectedNode ? (
+              <>
+                <div className="status-label">{typeLabel(selectedNode.node_type)}</div>
+                <h3>{selectedNode.label}</h3>
+                <div className="text-meta">{[selectedNode.subtitle, selectedNode.status, `${selectedNode.degree} edges`].filter(Boolean).join(" · ")}</div>
+                {selectedNode.description && <p className="graph-description">{selectedNode.description}</p>}
+                <div className="graph-rag-panel">
+                  <h4>Retrieval Hints</h4>
+                  {neighborhoodStatus ? (
+                    <div className="text-meta">{neighborhoodStatus}</div>
+                  ) : neighborhood ? (
+                    <>
+                      <div className="graph-hint-row">
+                        <span>Source</span>
+                        <strong>{neighborhood.retrieval_hints.source_key}</strong>
+                      </div>
+                      <div className="graph-hint-row">
+                        <span>Connected</span>
+                        <strong>{neighborhood.retrieval_hints.connected_source_keys.length}</strong>
+                      </div>
+                      <div className="graph-hint-chips">
+                        {neighborhood.retrieval_hints.connected_source_keys.slice(0, 8).map(key => <span key={key}>{key}</span>)}
+                        {neighborhood.retrieval_hints.connected_source_keys.length === 0 && <em>No connected sources</em>}
+                      </div>
+                      <div className="graph-query-terms">
+                        {neighborhood.retrieval_hints.query_terms.slice(0, 8).map(term => <span key={term}>{term}</span>)}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-meta">No retrieval hints available.</div>
+                  )}
+                </div>
+                <h4>Relationships</h4>
+                <div className="edge-list">
+                  {connectedEdges.map(edge => {
+                    const otherId = edge.source_node_id === selectedNode.id ? edge.target_node_id : edge.source_node_id;
+                    const other = nodeById.get(otherId);
+                    return (
+                      <div key={edge.id} className="edge-row">
+                        <div>
+                          <strong>{edge.edge_type}</strong>
+                          <span>{other?.label || otherId}</span>
+                          {edge.description && <p>{edge.description}</p>}
+                        </div>
+                        {!edge.auto_inferred && <button className="btn btn-sm btn-danger" onClick={() => deleteEdge(edge.id)}>Delete</button>}
+                      </div>
+                    );
+                  })}
+                  {connectedEdges.length === 0 && <div className="text-meta">No relationships yet.</div>}
+                </div>
+              </>
+            ) : (
+              <div className="text-meta">No node selected.</div>
+            )}
+
+            <div className="edge-form">
+              <h4>Add Relationship</h4>
+              <label>
+                <span>Source</span>
+                <select value={edgeForm.sourceId} onChange={e => setEdgeForm(prev => ({ ...prev, sourceId: e.target.value }))}>
+                  {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {typeLabel(node.node_type)}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Target</span>
+                <select value={edgeForm.targetId} onChange={e => setEdgeForm(prev => ({ ...prev, targetId: e.target.value }))}>
+                  {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {typeLabel(node.node_type)}</option>)}
+                </select>
+              </label>
+              <label>
+                <span>Type</span>
+                <input value={edgeForm.edgeType} onChange={e => setEdgeForm(prev => ({ ...prev, edgeType: e.target.value }))} />
+              </label>
+              <label>
+                <span>Description</span>
+                <textarea value={edgeForm.description} onChange={e => setEdgeForm(prev => ({ ...prev, description: e.target.value }))} />
+              </label>
+              <button className="btn btn-primary" onClick={createEdge} disabled={nodes.length < 2}>Create Edge</button>
+            </div>
+          </aside>
+        </div>
+        {message && <div className={`msg-banner ${message.startsWith("Error") ? "msg-error" : "msg-success"}`}>{message}</div>}
+      </div>
+    </>
+  );
+}
+
 // ---- SettingsPage ----
 function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
   const { settings } = useApp();
@@ -626,6 +1346,14 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
     } catch (e) { setTestResult("Error: " + e); }
     setTesting(false);
     refreshSettings();
+  };
+
+  const formatOptionalCost = (value?: number | null) => value === null || value === undefined ? "" : String(value);
+  const parseOptionalCost = (value: string) => {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
   };
 
   return (
@@ -670,6 +1398,8 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
           <SaveField label="Quality Threshold" value={String(settings.quality_threshold)} onSave={v => invoke("update_settings", { settings: { ...settings, quality_threshold: parseInt(v) || 85 } }).then(refreshSettings)} />
           <SaveField label="Max Revise Count" value={String(settings.max_revise_count)} onSave={v => invoke("update_settings", { settings: { ...settings, max_revise_count: parseInt(v) || 2 } }).then(refreshSettings)} />
           <SaveField label="Daily Target Words" value={String(settings.daily_target_words)} onSave={v => invoke("update_settings", { settings: { ...settings, daily_target_words: parseInt(v) || 3000 } }).then(refreshSettings)} />
+          <SaveField label="Input Cost / 1M Tokens" value={formatOptionalCost(settings.input_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, input_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
+          <SaveField label="Output Cost / 1M Tokens" value={formatOptionalCost(settings.output_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, output_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
           <div className="bible-edit-field">
             <label>Embedding Provider</label>
             <select className="select" value={settings.embedding_provider || "none"} onChange={e => {
@@ -706,7 +1436,7 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
 }
 
 // Inline-edit component: click to edit, blur/Enter to save
-function SaveField({ label, value, onSave }: { label: string; value: string; type?: string; onSave: (v: string) => void }) {
+function SaveField({ label, value, type = "text", onSave }: { label: string; value: string; type?: string; onSave: (v: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value);
   useEffect(() => { setVal(value); }, [value]);
@@ -715,7 +1445,7 @@ function SaveField({ label, value, onSave }: { label: string; value: string; typ
     <div className="bible-edit-field">
       <label>{label}</label>
       {editing ? (
-        <input autoFocus value={val} onChange={e => setVal(e.target.value)} onBlur={save} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") { setVal(value); setEditing(false); } }}
+        <input autoFocus type={type} step={type === "number" ? "0.0001" : undefined} min={type === "number" ? "0" : undefined} value={val} onChange={e => setVal(e.target.value)} onBlur={save} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") { setVal(value); setEditing(false); } }}
           style={{ padding: "6px 10px", background: "var(--surface-dark-card)", color: "var(--on-dark)", border: "1px solid var(--primary)", borderRadius: "var(--radius-sm)", fontSize: 13, width: "100%", maxWidth: 400 }} />
       ) : (
         <div onClick={() => setEditing(true)} style={{ padding: "6px 10px", cursor: "pointer", color: "var(--on-dark-body)", borderBottom: "1px dashed var(--hairline-dark)" }}>

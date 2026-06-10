@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::models::chapter::ChapterPlan;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentReview {
@@ -39,6 +39,30 @@ pub struct ReviewScores {
     pub metadata: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentQualityScore {
+    pub agent_name: String,
+    pub review_count: usize,
+    pub average_score: Option<f64>,
+    pub pass_rate: Option<f64>,
+    pub blocking_issue_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectQualitySummary {
+    pub project_id: String,
+    pub reviewed_chapter_count: usize,
+    pub publish_ready_count: usize,
+    pub revise_count: usize,
+    pub needs_human_review_count: usize,
+    pub average_score: Option<f64>,
+    pub average_final_score: Option<f64>,
+    pub total_blocking_issues: i32,
+    pub latest_decision: Option<String>,
+    pub latest_final_score: Option<f64>,
+    pub agent_scores: Vec<AgentQualityScore>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

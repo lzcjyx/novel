@@ -61,19 +61,33 @@ struct TestReview {
 
 #[derive(Debug)]
 struct TestAggregation {
-    average_score: f64, final_score: f64,
-    decision: String, publish_allowed: bool,
+    _average_score: f64,
+    final_score: f64,
+    decision: String,
+    publish_allowed: bool,
     blocking_issue_count: i32,
 }
 
 fn make_reviews(scores: Vec<i32>, passes: Vec<bool>) -> Vec<TestReview> {
-    let agents = ["continuity", "character", "plot_logic", "pacing", "style", "safety", "publication"];
-    scores.iter().enumerate().map(|(i, &s)| TestReview {
-        agent_name: agents[i % agents.len()].into(),
-        score: Some(s),
-        pass: Some(passes[i % passes.len()]),
-        blocking_issues: "[]".into(),
-    }).collect()
+    let agents = [
+        "continuity",
+        "character",
+        "plot_logic",
+        "pacing",
+        "style",
+        "safety",
+        "publication",
+    ];
+    scores
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| TestReview {
+            agent_name: agents[i % agents.len()].into(),
+            score: Some(s),
+            pass: Some(passes[i % passes.len()]),
+            blocking_issues: "[]".into(),
+        })
+        .collect()
 }
 
 fn count_json_items(s: &str) -> usize {
@@ -83,19 +97,39 @@ fn count_json_items(s: &str) -> usize {
     }
 }
 
-fn arbiter_aggregate(reviews: &[TestReview], quality_threshold: i32, max_revise_count: i32, revise_count: i32) -> TestAggregation {
+fn arbiter_aggregate(
+    reviews: &[TestReview],
+    quality_threshold: i32,
+    max_revise_count: i32,
+    revise_count: i32,
+) -> TestAggregation {
     if reviews.is_empty() {
-        return TestAggregation { average_score: 0.0, final_score: 0.0, decision: "needs_human_review".into(), publish_allowed: false, blocking_issue_count: 0 };
+        return TestAggregation {
+            _average_score: 0.0,
+            final_score: 0.0,
+            decision: "needs_human_review".into(),
+            publish_allowed: false,
+            blocking_issue_count: 0,
+        };
     }
 
     let scores: Vec<i32> = reviews.iter().filter_map(|r| r.score).collect();
-    let avg = if scores.is_empty() { 0.0 } else {
+    let avg = if scores.is_empty() {
+        0.0
+    } else {
         scores.iter().map(|&s| s as f64).sum::<f64>() / scores.len() as f64
     };
 
-    let has_blocking = reviews.iter().any(|r| count_json_items(&r.blocking_issues) > 0);
-    let safety_failed = reviews.iter().any(|r| r.agent_name == "safety" && r.pass == Some(false));
-    let blocking_count = reviews.iter().map(|r| count_json_items(&r.blocking_issues)).sum::<usize>() as i32;
+    let has_blocking = reviews
+        .iter()
+        .any(|r| count_json_items(&r.blocking_issues) > 0);
+    let safety_failed = reviews
+        .iter()
+        .any(|r| r.agent_name == "safety" && r.pass == Some(false));
+    let blocking_count = reviews
+        .iter()
+        .map(|r| count_json_items(&r.blocking_issues))
+        .sum::<usize>() as i32;
 
     let (final_score, decision, publish_allowed) = if safety_failed {
         (avg.min(40.0), "needs_human_review", false)
@@ -107,7 +141,11 @@ fn arbiter_aggregate(reviews: &[TestReview], quality_threshold: i32, max_revise_
         }
     } else if avg < quality_threshold as f64 {
         if revise_count >= max_revise_count {
-            (avg.min(quality_threshold as f64 - 1.0), "needs_human_review", false)
+            (
+                avg.min(quality_threshold as f64 - 1.0),
+                "needs_human_review",
+                false,
+            )
         } else {
             (avg, "revise", false)
         }
@@ -115,5 +153,11 @@ fn arbiter_aggregate(reviews: &[TestReview], quality_threshold: i32, max_revise_
         (avg, "publish_ready", true)
     };
 
-    TestAggregation { average_score: avg, final_score, decision: decision.to_string(), publish_allowed, blocking_issue_count: blocking_count }
+    TestAggregation {
+        _average_score: avg,
+        final_score,
+        decision: decision.to_string(),
+        publish_allowed,
+        blocking_issue_count: blocking_count,
+    }
 }

@@ -2,12 +2,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
-    pub provider: String,           // "deepseek" | "openai" | "openai_compat" | "anthropic" | "gemini"
+    pub provider: String, // "deepseek" | "openai" | "openai_compat" | "anthropic" | "gemini"
     pub model: String,
     pub base_url: String,
     pub embedding_model: String,
-    pub embedding_provider: String,   // "openai" | "zhipu" | "openai_compat" | "none"
-    pub embedding_base_url: String,   // separate base URL for embedding API
+    pub embedding_provider: String, // "openai" | "zhipu" | "openai_compat" | "none"
+    pub embedding_base_url: String, // separate base URL for embedding API
     pub embedding_dim: i32,
     pub quality_threshold: i32,
     pub auto_publish: bool,
@@ -18,6 +18,8 @@ pub struct AppSettings {
     pub blog_provider: String,
     pub blog_url: Option<String>,
     pub blog_username: Option<String>,
+    pub input_cost_per_million: Option<f64>,
+    pub output_cost_per_million: Option<f64>,
 }
 
 impl Default for AppSettings {
@@ -43,6 +45,8 @@ impl Default for AppSettings {
             blog_provider: "none".into(),
             blog_url: None,
             blog_username: None,
+            input_cost_per_million: None,
+            output_cost_per_million: None,
         }
     }
 }

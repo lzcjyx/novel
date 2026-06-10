@@ -1,13 +1,17 @@
-use tokio::sync::mpsc;
-use serde_json::json;
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
-use crate::db::{projects, chapters, bible};
+use crate::db::{bible, chapters, projects};
 use crate::models::*;
 use crate::prompts;
+use serde_json::json;
+use tokio::sync::mpsc;
 
 fn log(log_tx: &mpsc::Sender<String>, msg: &str) {
-    let _ = log_tx.try_send(format!("[{}] {}", chrono::Local::now().format("%H:%M:%S"), msg));
+    let _ = log_tx.try_send(format!(
+        "[{}] {}",
+        chrono::Local::now().format("%H:%M:%S"),
+        msg
+    ));
 }
 
 pub async fn run_weekly_arc_planner(
@@ -22,7 +26,10 @@ pub async fn run_weekly_arc_planner(
     let existing_chapters = chapters::get_chapters(db, project_id)?;
     let canon = bible::get_bible(db, project_id)?;
     let plans = chapters::get_chapter_plans(db, project_id)?;
-    let planned_count = plans.iter().filter(|p| p.status == "planned" || p.status == "in_progress").count();
+    let planned_count = plans
+        .iter()
+        .filter(|p| p.status == "planned" || p.status == "in_progress")
+        .count();
 
     let context = serde_json::json!({
         "project_name": project.name,
@@ -44,7 +51,14 @@ pub async fn run_weekly_arc_planner(
         })).collect::<Vec<_>>(),
     });
 
-    let system = prompts::load_prompt("review_agents").unwrap_or_else(|_| "Plan the next 7-14 chapters.".into());
+    let template = prompts::load_prompt("weekly_planner")?;
+    let context_json = serde_json::to_string_pretty(&context).unwrap_or_default();
+    let vars = std::collections::HashMap::from([("WEEKLY_PLANNER_CONTEXT_JSON", context_json)]);
+    let system = crate::workflow::prompt_rendering::render_prompt_strict(
+        "weekly_planner",
+        &template,
+        &vars,
+    )?;
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -75,12 +89,14 @@ pub async fn run_weekly_arc_planner(
     });
 
     log(log_tx, "Calling AI for arc plan...");
-    let plan = provider.generate_json(
-        &system,
-        &serde_json::to_string_pretty(&context).unwrap_or_default(),
-        &schema,
-        16384,
-    ).await?;
+    let plan = provider
+        .generate_json(
+            &system,
+            "请基于 system prompt 中的上下文生成下一组章节计划，只输出 JSON。",
+            &schema,
+            16384,
+        )
+        .await?;
 
     // Parse and insert chapter plans
     let chapters_arr = find_chapters(&plan);
@@ -93,10 +109,22 @@ pub async fn run_weekly_arc_planner(
 
         for (i, ch) in arr.iter().enumerate() {
             let id = Database::new_uuid();
-            let seq = ch.get("sequence").and_then(|v| v.as_i64()).unwrap_or((max_seq + i as i32 + 1) as i64) as i32;
-            let title = ch.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let outline = ch.get("outline").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let wc = ch.get("target_word_count").and_then(|v| v.as_i64()).unwrap_or(3000) as i32;
+            let seq = ch
+                .get("sequence")
+                .and_then(|v| v.as_i64())
+                .unwrap_or((max_seq + i as i32 + 1) as i64) as i32;
+            let title = ch
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let outline = ch
+                .get("outline")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let wc = ch
+                .get("target_word_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(3000) as i32;
 
             let _ = conn.execute(
                 "INSERT OR IGNORE INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
@@ -104,14 +132,28 @@ pub async fn run_weekly_arc_planner(
                 rusqlite::params![id, project_id, seq, title, outline, wc],
             );
             new_plans.push(ChapterPlan {
-                id, project_id: project_id.to_string(), volume_id: None,
-                sequence: seq, title, outline, pov_character_id: None,
+                id,
+                project_id: project_id.to_string(),
+                volume_id: None,
+                sequence: seq,
+                title,
+                outline,
+                pov_character_id: None,
                 target_word_count: Some(wc),
-                required_characters: "[]".into(), required_locations: "[]".into(),
-                plot_goals: ch.get("plot_goals").map(|v| v.to_string()).unwrap_or("[]".into()),
-                required_foreshadowing: ch.get("required_foreshadowing").map(|v| v.to_string()).unwrap_or("[]".into()),
-                status: "planned".into(), metadata: "{}".into(),
-                created_at: String::new(), updated_at: String::new(),
+                required_characters: "[]".into(),
+                required_locations: "[]".into(),
+                plot_goals: ch
+                    .get("plot_goals")
+                    .map(|v| v.to_string())
+                    .unwrap_or("[]".into()),
+                required_foreshadowing: ch
+                    .get("required_foreshadowing")
+                    .map(|v| v.to_string())
+                    .unwrap_or("[]".into()),
+                status: "planned".into(),
+                metadata: "{}".into(),
+                created_at: String::new(),
+                updated_at: String::new(),
             });
             created += 1;
         }
@@ -130,10 +172,10 @@ pub async fn run_weekly_arc_planner(
 
 fn find_chapters(plan: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
     // Try multiple possible paths
-    plan["weekly_plan"]["chapters"].as_array()
+    plan["weekly_plan"]["chapters"]
+        .as_array()
         .or_else(|| plan["chapters"].as_array())
         .or_else(|| plan["weekly_plan"]["chapter_plans"].as_array())
         .or_else(|| plan["new_chapter_plans"].as_array())
         .or_else(|| plan["chapter_plans"].as_array())
 }
-

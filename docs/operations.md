@@ -1,230 +1,122 @@
-# 日常运维手册
+# AI 小说工厂日常运维手册
 
-## 日常检查
+当前项目是本地 Tauri 桌面应用，主数据库是 SQLite。默认数据目录在系统 Documents 下的 `AI-Novels`，数据库文件通常是 `AI-Novels/ai-novel-factory.db`，导出的章节 Markdown 也在该目录下。
 
-### 1. 检查今天的章节是否生成
+## 每日生产流程
+
+1. 打开 Dashboard，选择项目。
+2. 如果 `Plans Left` 为 0，先运行 `Generate Weekly Plan`。
+3. 在 `Chapter Controls` 里填写本章意图、必写节拍、禁止动作和风格重点。
+4. 点 `Refresh` 检查 `Context Preview`，确认下一章计划、上一章钩子、canon 数量和学习条目正常。
+5. 点 `Write With Controls`。流水线应依次出现 `acquire_lock`、`load_canon`、`retrieve_context`、`generate_draft`、`aggregate_reviews`、`export`、`update_canon`、`complete`。
+6. 生成后到 Chapters 查看正文，到 Reviews 查看评分和阻塞意见。
+
+## 状态检查
+
+使用 SQLite 客户端打开本地数据库后可运行：
 
 ```sql
 SELECT
-  p.title AS project,
+  p.name AS project,
   cp.sequence,
-  gj.job_date,
-  gj.status,
-  gj.final_score,
-  gj.error_message
-FROM generation_jobs gj
-JOIN projects p ON gj.project_id = p.id
-JOIN chapter_plans cp ON gj.chapter_plan_id = cp.id
-WHERE gj.job_date = CURRENT_DATE
-ORDER BY p.title, cp.sequence;
-```
-
-### 2. 检查待人工审核的章节
-
-```sql
-SELECT
-  p.title,
-  c.sequence,
-  c.title AS chapter_title,
-  c.status,
-  c.updated_at
-FROM chapters c
-JOIN projects p ON c.project_id = p.id
-WHERE c.status = 'needs_human_review';
-```
-
-### 3. 检查审稿评分趋势
-
-```sql
-SELECT
-  p.title,
-  c.sequence,
-  rs.overall_score,
-  rs.decision,
-  rs.created_at
-FROM review_scores rs
-JOIN chapters c ON rs.chapter_id = c.id
-JOIN projects p ON rs.project_id = p.id
-ORDER BY rs.created_at DESC
-LIMIT 20;
-```
-
-### 4. 检查生成失败
-
-```sql
-SELECT
-  p.title,
+  cp.title AS plan_title,
   gj.job_date,
   gj.status,
   gj.error_message,
-  gj.stderr,
   gj.updated_at
 FROM generation_jobs gj
 JOIN projects p ON gj.project_id = p.id
-WHERE gj.status = 'failed'
-ORDER BY gj.updated_at DESC
-LIMIT 10;
+JOIN chapter_plans cp ON gj.chapter_plan_id = cp.id
+ORDER BY gj.created_at DESC
+LIMIT 20;
 ```
-
-## 手动操作
-
-### 重新生成失败的章节
-
-1. 在 `generation_jobs` 中找到失败的 job。
-2. 删除该 job 记录（允许明天重新生成）：
-   ```sql
-   DELETE FROM generation_jobs WHERE id = 'FAILED_JOB_ID';
-   ```
-3. 或者在 `chapter_plans` 中确保该章节状态还是 `planned`。
-4. 下次定时触发时会重试。
-
-### 手动发布一章
-
-1. 确保章节在 `chapters` 中 `status = 'final'`。
-2. 检查 `blog_posts` 是否已有记录：
-   ```sql
-   SELECT * FROM blog_posts WHERE chapter_id = 'CHAPTER_ID';
-   ```
-3. 如果没有，手动运行 workfow 04 `review_and_repair`，设置 `force_publish=true`。
-4. 或直接通过 WordPress / 博客 API 发布，然后手动写入 `blog_posts`：
-   ```sql
-   INSERT INTO blog_posts (project_id, chapter_id, external_post_id, slug, title, url, status, published_at)
-   VALUES ('PROJECT_ID', 'CHAPTER_ID', 'WP_POST_ID', 'slug', 'Title', 'URL', 'published', now())
-   ON CONFLICT (project_id, chapter_id) DO UPDATE SET
-     external_post_id = EXCLUDED.external_post_id,
-     status = 'published',
-     published_at = now(),
-     updated_at = now();
-   ```
-
-### 激活/暂停项目
-
-```sql
--- 激活
-UPDATE projects SET status = 'active', updated_at = now() WHERE id = 'PROJECT_ID';
-
--- 暂停
-UPDATE projects SET status = 'paused', updated_at = now() WHERE id = 'PROJECT_ID';
-
--- 归档
-UPDATE projects SET status = 'archived', updated_at = now() WHERE id = 'PROJECT_ID';
-```
-
-### 锁定/解锁 canon
-
-```sql
--- 锁定一条 canon rule
-UPDATE canon_rules SET is_locked = true, updated_at = now() WHERE id = 'RULE_ID';
-
--- 解锁
-UPDATE canon_rules SET is_locked = false, updated_at = now() WHERE id = 'RULE_ID';
-```
-
-### 手动更新章节计划
-
-```sql
--- 跳过一章
-UPDATE chapter_plans SET status = 'skipped', updated_at = now() WHERE id = 'PLAN_ID';
-
--- 重新激活一章
-UPDATE chapter_plans SET status = 'planned', updated_at = now() WHERE id = 'PLAN_ID';
-```
-
-## 数据库维护
-
-### 查看表大小
 
 ```sql
 SELECT
-  tablename,
-  pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
-FROM pg_tables
-WHERE schemaname = 'public'
-ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
+  c.sequence,
+  c.title,
+  c.status,
+  c.word_count,
+  rs.final_score,
+  rs.decision,
+  c.updated_at
+FROM chapters c
+LEFT JOIN review_scores rs ON rs.chapter_id = c.id
+WHERE c.project_id = 'PROJECT_ID'
+ORDER BY c.sequence DESC;
 ```
 
-### 查看向量索引大小
+## 失败恢复
+
+常见恢复顺序：
+
+1. Dashboard 如果显示运行中但没有进度，先重启应用。
+2. 仍卡住时使用 `Reset Stuck Job`，只重置前端运行标记。
+3. 如果数据库里 job 一直是 `started`、`reviewing`、`revising` 或 `publishing`，确认没有真实生成任务后再改状态：
 
 ```sql
-SELECT
-  indexname,
-  pg_size_pretty(pg_relation_size(indexname::regclass)) AS size
-FROM pg_indexes
-WHERE indexname LIKE '%embedding%';
+UPDATE generation_jobs
+SET status = 'failed',
+    error_message = 'manually marked failed after local app recovery',
+    completed_at = datetime('now'),
+    updated_at = datetime('now')
+WHERE id = 'JOB_ID';
 ```
 
-### 清理旧版本（可选）
+4. 如果章节计划已经被置为 `in_progress` 但没有对应章节，可重新激活：
 
 ```sql
--- 保留每个 chapter 最新 3 个 version，删除更旧的
-DELETE FROM chapter_versions
-WHERE id IN (
-  SELECT id FROM (
-    SELECT id,
-      ROW_NUMBER() OVER (PARTITION BY chapter_id ORDER BY version_number DESC) AS rn
-    FROM chapter_versions
-  ) sub WHERE rn > 3
-);
+UPDATE chapter_plans
+SET status = 'planned',
+    updated_at = datetime('now')
+WHERE id = 'PLAN_ID';
 ```
+
+## 上下文质量维护
+
+为了减少上下文断裂：
+
+```sql
+SELECT sequence, title, status, summary
+FROM chapters
+WHERE project_id = 'PROJECT_ID'
+ORDER BY sequence DESC
+LIMIT 8;
+```
+
+如果最近章节摘要为空或不准确，先在 Chapters 里人工修正文稿，再让后续生成使用新的最终版本。生成成功后，canon 更新使用最终稿，不再使用初稿。
+
+学习库检查：
+
+```sql
+SELECT category, pattern_name, confidence, usage_count, last_used_at
+FROM learning_entries
+WHERE project_id = 'PROJECT_ID'
+ORDER BY confidence DESC, usage_count ASC
+LIMIT 20;
+```
+
+缺少风格样本时，到 Learn 页面加入人工样章或网页样章。Dashboard 的 `Context Preview` 会显示本次将注入的高置信学习条目。
+
+## 向量索引维护
+
+如果 Dashboard 显示 RAG 为 OFF，到 Settings 配置 Embedding Provider。修改 Bible 条目后可在 Bible 页面使用 `Apply to All & Rebuild Index`。
+
+手动清空某项目向量元数据：
+
+```sql
+DELETE FROM vector_document_metadata
+WHERE project_id = 'PROJECT_ID';
+```
+
+随后在应用里重建索引。
 
 ## 备份
 
-### 导出 schema + 数据
+关闭应用后复制整个 `AI-Novels` 目录即可备份数据库和导出章节。最小备份只需复制：
 
-```bash
-# 使用 Direct Connection
-pg_dump "$NEON_DATABASE_URL_DIRECT" \
-  --no-owner --no-acl \
-  --format=custom \
-  --file=novel_factory_$(date +%Y%m%d).dump
+```text
+AI-Novels/ai-novel-factory.db
 ```
 
-### 仅导出 schema
-
-```bash
-pg_dump "$NEON_DATABASE_URL_DIRECT" \
-  --schema-only --no-owner --no-acl \
-  --file=novel_factory_schema_$(date +%Y%m%d).sql
-```
-
-### 恢复
-
-```bash
-pg_restore "$NEON_DATABASE_URL_DIRECT" \
-  --clean --if-exists \
-  --no-owner --no-acl \
-  novel_factory_YYYYMMDD.dump
-```
-
-## 监控指标
-
-### 每日生产健康度
-
-```sql
-SELECT
-  job_date,
-  COUNT(*) AS total_jobs,
-  COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-  COUNT(*) FILTER (WHERE status = 'failed') AS failed,
-  COUNT(*) FILTER (WHERE status = 'needs_human_review') AS needs_review,
-  ROUND(AVG(final_score) FILTER (WHERE status = 'completed'), 1) AS avg_score
-FROM generation_jobs
-WHERE job_date >= CURRENT_DATE - INTERVAL '14 days'
-GROUP BY job_date
-ORDER BY job_date DESC;
-```
-
-### 审稿 Agent 表现
-
-```sql
-SELECT
-  agent_name,
-  COUNT(*) AS reviews,
-  ROUND(AVG(score), 1) AS avg_score,
-  COUNT(*) FILTER (WHERE pass = false) AS failures,
-  ROUND(COUNT(*) FILTER (WHERE pass = false) * 100.0 / COUNT(*), 1) AS failure_rate
-FROM agent_reviews
-WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY agent_name
-ORDER BY agent_name;
-```
+恢复时先关闭应用，再用备份文件替换同名数据库。

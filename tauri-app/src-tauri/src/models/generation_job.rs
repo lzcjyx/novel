@@ -61,6 +61,8 @@ pub struct VectorDocument {
     pub title: Option<String>,
     pub content: String,
     #[serde(default)]
+    pub content_hash: String,
+    #[serde(default)]
     pub metadata: String,
     pub created_at: String,
     pub updated_at: String,
@@ -78,6 +80,12 @@ pub struct PipelineEvent {
     pub detail: Option<String>,
     pub progress_pct: f64,
     pub timestamp: String,
+    #[serde(default)]
+    pub preview_title: Option<String>,
+    #[serde(default)]
+    pub preview_text: Option<String>,
+    #[serde(default)]
+    pub preview_kind: Option<String>,
 }
 
 /// Self-learning knowledge entry

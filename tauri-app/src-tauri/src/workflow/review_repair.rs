@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
 use crate::db::{chapters, reviews};
 use crate::models::*;
 use crate::prompts;
+use std::collections::HashMap;
 
 pub async fn retry_chapter(
     db: &Database,
@@ -19,14 +19,34 @@ pub async fn retry_chapter(
     let chapter_text = version.body_markdown.unwrap_or_default();
     let revision_template = prompts::load_prompt("revision_writer")?;
 
+    let rev_input = serde_json::json!({
+        "chapter": {
+            "title": version.title.clone(),
+            "body_markdown": chapter_text,
+            "summary": version.summary.clone(),
+            "word_count": version.word_count,
+        },
+        "reviews": agent_reviews,
+    });
     let mut vars = HashMap::new();
-    vars.insert("CHAPTER_JSON".to_string(), chapter_text.clone());
-    vars.insert("REVIEW_REPORTS_JSON".to_string(), serde_json::to_string(&agent_reviews).unwrap_or_default());
+    vars.insert(
+        "REVISION_INPUT_JSON".to_string(),
+        serde_json::to_string_pretty(&rev_input).unwrap_or_default(),
+    );
 
-    let rendered = prompts::render_prompt(&revision_template, &vars.iter().map(|(k,v)| (k.as_str(), v.clone())).collect());
+    let rendered = crate::workflow::prompt_rendering::render_prompt_strict(
+        "revision_writer",
+        &revision_template,
+        &vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect(),
+    )?;
     let (sys, user) = if let Some(pos) = rendered.find("\n\n") {
-        (rendered[..pos].to_string(), rendered[pos..].trim_start_matches('\n').to_string())
-    } else { (rendered.clone(), rendered) };
+        (
+            rendered[..pos].to_string(),
+            rendered[pos..].trim_start_matches('\n').to_string(),
+        )
+    } else {
+        (rendered.clone(), rendered)
+    };
 
     let schema = serde_json::json!({
         "type": "object",
@@ -47,7 +67,9 @@ pub async fn retry_chapter(
 
     let new_title = revised["title"].as_str().unwrap_or("Revised").to_string();
     let new_body = revised["body_markdown"].as_str().unwrap_or("").to_string();
-    let new_wc = revised["word_count"].as_i64().unwrap_or(new_body.len() as i64) as i32;
+    let new_wc = revised["word_count"]
+        .as_i64()
+        .unwrap_or(new_body.len() as i64) as i32;
     let new_version_number = version.version_number + 1;
 
     let new_version_id = Database::new_uuid();
@@ -61,9 +83,17 @@ pub async fn retry_chapter(
     drop(conn);
 
     chapters::update_chapter_after_revision(
-        db, chapter_id, &chapter.project_id, &new_version_id,
-        &new_title, &new_body, new_wc, "",
-        "revised", 0.0, "revised",
+        db,
+        chapter_id,
+        &chapter.project_id,
+        &new_version_id,
+        &new_title,
+        &new_body,
+        new_wc,
+        "",
+        "revised",
+        0.0,
+        "revised",
     )?;
 
     Ok(RevisionResult {

@@ -1,18 +1,18 @@
 use std::sync::Mutex;
+use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
-use tauri::{Manager, Emitter};
 
-pub mod db;
-pub mod models;
 pub mod ai;
-pub mod workflow;
-pub mod vector;
+pub mod db;
+pub mod export;
+pub mod models;
 pub mod prompts;
 pub mod security;
-pub mod export;
+pub mod vector;
+pub mod workflow;
 
-use db::connection::Database;
 use ai::client::ModelClient;
+use db::connection::Database;
 use models::*;
 use security::keychain;
 
@@ -28,7 +28,25 @@ fn add_log(state: &AppState, msg: &str) {
     if let Ok(mut logs) = state.logs.lock() {
         logs.push(line);
         let len = logs.len();
-        if len > 500 { logs.drain(0..len - 500); }
+        if len > 500 {
+            logs.drain(0..len - 500);
+        }
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        let _ = app.emit_to(
+            "main",
+            "app-resume",
+            serde_json::json!({
+                "reason": "tray_restore",
+                "timestamp": chrono::Local::now().format("%H:%M:%S").to_string(),
+            }),
+        );
     }
 }
 
@@ -49,14 +67,18 @@ fn get_api_key_fallback(state: &AppState, provider: &str) -> Result<String, Stri
         Ok(v) => {
             let key = v.trim_matches('"').to_string();
             if key.is_empty() {
-                Err(format!("No API key configured for {}. Go to Settings > Model Provider.", provider))
+                Err(format!(
+                    "No API key configured for {}. Go to Settings > Model Provider.",
+                    provider
+                ))
             } else {
                 Ok(key)
             }
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            Err(format!("No API key configured for {}. Go to Settings > Model Provider to set it.", provider))
-        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Err(format!(
+            "No API key configured for {}. Go to Settings > Model Provider to set it.",
+            provider
+        )),
         Err(e) => Err(format!("Cannot read API key: {}", e)),
     }
 }
@@ -65,9 +87,14 @@ fn get_provider(state: &AppState) -> Result<Box<dyn ModelClient>, String> {
     let settings = db::settings::get_settings(&state.db)?;
     let api_key = get_api_key_fallback(state, &settings.provider)?;
     ai::factory::ProviderConfig {
-        provider_type: settings.provider, api_key, base_url: settings.base_url,
-        model: settings.model, embedding_model: settings.embedding_model, timeout_secs: 600,
-    }.build()
+        provider_type: settings.provider,
+        api_key,
+        base_url: settings.base_url,
+        model: settings.model,
+        embedding_model: settings.embedding_model,
+        timeout_secs: 600,
+    }
+    .build()
 }
 
 /// Get a dedicated embedding provider. Falls back to the main provider if no separate embedding config.
@@ -92,9 +119,14 @@ fn get_embedding_provider(state: &AppState) -> Result<Box<dyn ModelClient>, Stri
     };
 
     ai::factory::ProviderConfig {
-        provider_type: emb_provider.clone(), api_key, base_url,
-        model: settings.embedding_model.clone(), embedding_model: settings.embedding_model.clone(), timeout_secs: 600,
-    }.build()
+        provider_type: emb_provider.clone(),
+        api_key,
+        base_url,
+        model: settings.embedding_model.clone(),
+        embedding_model: settings.embedding_model.clone(),
+        timeout_secs: 600,
+    }
+    .build()
 }
 
 // ============================================================================
@@ -102,28 +134,59 @@ fn get_embedding_provider(state: &AppState) -> Result<Box<dyn ModelClient>, Stri
 // ============================================================================
 
 #[tauri::command]
-async fn create_project(state: tauri::State<'_, AppState>, name: String, description: Option<String>,
-    genre: Option<String>, sub_genre: Option<String>, target_audience: Option<String>,
-    tone: Option<String>, style_profile_desc: Option<String>,
-    target_total_words: Option<u32>, daily_target_words: Option<u32>,
+async fn create_project(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    description: Option<String>,
+    genre: Option<String>,
+    sub_genre: Option<String>,
+    target_audience: Option<String>,
+    tone: Option<String>,
+    style_profile_desc: Option<String>,
+    target_total_words: Option<u32>,
+    daily_target_words: Option<u32>,
 ) -> Result<Project, String> {
     let provider = get_provider(&state)?;
-    let input = CreateProjectInput { name, description, genre, sub_genre, target_audience, tone, style_profile_desc, target_total_words, daily_target_words };
+    let input = CreateProjectInput {
+        name,
+        description,
+        genre,
+        sub_genre,
+        target_audience,
+        tone,
+        style_profile_desc,
+        target_total_words,
+        daily_target_words,
+    };
     add_log(&state, &format!("Creating project: {}", input.name));
 
     let (log_tx, mut log_rx) = mpsc::channel::<String>(100);
 
     // Run bootstrap directly (not in a separate thread) — keeps things simple and reliable
-    let result = workflow::novel_bootstrap::bootstrap_novel(&state.db, provider.as_ref(), &input, &log_tx).await?;
+    let result =
+        workflow::novel_bootstrap::bootstrap_novel(&state.db, provider.as_ref(), &input, &log_tx)
+            .await?;
 
     // Drain all logs
-    while let Ok(msg) = log_rx.try_recv() { add_log(&state, &msg); }
-    add_log(&state, &format!("Project {} created with {} characters, {} chapters, {} lore",
-        result.name,
-        crate::db::bible::get_bible(&state.db, &result.id).map(|b| b.characters.len().to_string()).unwrap_or("?".into()),
-        crate::db::chapters::get_chapter_plans(&state.db, &result.id).map(|p| p.len().to_string()).unwrap_or("?".into()),
-        crate::db::bible::get_bible(&state.db, &result.id).map(|b| b.world_lore.len().to_string()).unwrap_or("?".into()),
-    ));
+    while let Ok(msg) = log_rx.try_recv() {
+        add_log(&state, &msg);
+    }
+    add_log(
+        &state,
+        &format!(
+            "Project {} created with {} characters, {} chapters, {} lore",
+            result.name,
+            crate::db::bible::get_bible(&state.db, &result.id)
+                .map(|b| b.characters.len().to_string())
+                .unwrap_or("?".into()),
+            crate::db::chapters::get_chapter_plans(&state.db, &result.id)
+                .map(|p| p.len().to_string())
+                .unwrap_or("?".into()),
+            crate::db::bible::get_bible(&state.db, &result.id)
+                .map(|b| b.world_lore.len().to_string())
+                .unwrap_or("?".into()),
+        ),
+    );
     Ok(result)
 }
 
@@ -155,7 +218,10 @@ async fn delete_project(state: tauri::State<'_, AppState>, id: String) -> Result
     // Clean up files on disk
     if std::path::Path::new(&paper_dir).exists() {
         if let Err(e) = std::fs::remove_dir_all(&paper_dir) {
-            add_log(&state, &format!("Warning: could not delete paper dir {}: {}", paper_dir, e));
+            add_log(
+                &state,
+                &format!("Warning: could not delete paper dir {}: {}", paper_dir, e),
+            );
         } else {
             add_log(&state, &format!("Deleted paper dir: {}", paper_dir));
         }
@@ -168,7 +234,13 @@ async fn delete_project(state: tauri::State<'_, AppState>, id: String) -> Result
 // ============================================================================
 
 #[tauri::command]
-async fn generate_next_chapter(app: tauri::AppHandle, state: tauri::State<'_, AppState>, project_id: String, force: bool) -> Result<GenerationResult, String> {
+async fn generate_next_chapter(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    force: bool,
+    operator_controls: Option<workflow::writing_context::OperatorControls>,
+) -> Result<GenerationResult, String> {
     {
         let running = state.running.lock().unwrap();
         if *running {
@@ -178,21 +250,54 @@ async fn generate_next_chapter(app: tauri::AppHandle, state: tauri::State<'_, Ap
     *state.running.lock().unwrap() = true;
 
     // Guard: ensure running is reset even if the pipeline panics
-    struct RunningGuard<'a> { running: &'a Mutex<bool> }
-    impl Drop for RunningGuard<'_> { fn drop(&mut self) { *self.running.lock().unwrap() = false; } }
-    let _guard = RunningGuard { running: &state.running };
+    struct RunningGuard<'a> {
+        running: &'a Mutex<bool>,
+    }
+    impl Drop for RunningGuard<'_> {
+        fn drop(&mut self) {
+            *self.running.lock().unwrap() = false;
+        }
+    }
+    let _guard = RunningGuard {
+        running: &state.running,
+    };
 
     let provider = get_provider(&state)?;
     let emb_provider = get_embedding_provider(&state).ok(); // Ok if configured, None if "none"
-    add_log(&state, &format!("Starting chapter generation for project {}", &project_id[..8]));
+    add_log(
+        &state,
+        &format!(
+            "Starting chapter generation for project {}",
+            &project_id[..8]
+        ),
+    );
 
     let (log_tx, mut log_rx) = mpsc::channel::<String>(100);
     let (event_tx, mut event_rx) = mpsc::channel::<PipelineEvent>(50);
-    let result = workflow::chapter_production::generate_next_chapter(&state.db, provider.as_ref(), emb_provider.as_ref().map(|p| p.as_ref()), &project_id, force, &log_tx, &event_tx).await;
+    let app_for_events = app.clone();
+    let event_relay = tokio::spawn(async move {
+        while let Some(ev) = event_rx.recv().await {
+            let _ = app_for_events.emit_to("main", "pipeline-step", &ev);
+        }
+    });
+    let result = workflow::chapter_production::generate_next_chapter(
+        &state.db,
+        provider.as_ref(),
+        emb_provider.as_ref().map(|p| p.as_ref()),
+        &project_id,
+        force,
+        &log_tx,
+        &event_tx,
+        operator_controls,
+    )
+    .await;
 
-    // Drain events — emit to frontend via Tauri
-    while let Ok(ev) = event_rx.try_recv() { let _ = app.emit_to("main", "pipeline-step", &ev); }
-    while let Ok(msg) = log_rx.try_recv() { add_log(&state, &msg); }
+    drop(event_tx);
+    let _ = event_relay.await;
+
+    while let Ok(msg) = log_rx.try_recv() {
+        add_log(&state, &msg);
+    }
 
     match result {
         Ok(r) => {
@@ -208,50 +313,151 @@ async fn generate_next_chapter(app: tauri::AppHandle, state: tauri::State<'_, Ap
 }
 
 #[tauri::command]
-async fn rebuild_vector_index(state: tauri::State<'_, AppState>, project_id: String) -> Result<String, String> {
-    let provider = get_provider(&state)?;
-    let emb_provider = get_embedding_provider(&state).ok();
-    let embed = emb_provider.as_ref().map(|p| p.as_ref()).unwrap_or(provider.as_ref());
+async fn rebuild_vector_index(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<String, String> {
     let bible_data = crate::db::bible::get_bible(&state.db, &project_id)?;
 
-    let mut texts: Vec<(String, &str, String)> = Vec::new();
+    let mut candidates: Vec<crate::db::vector_store::VectorIndexCandidate> = Vec::new();
     for c in &bible_data.characters {
-        let content = format!("角色: {}\n性格: {}\n动机: {}\n说话风格: {}\n外貌: {}\n背景: {}",
-            c.name, c.personality.as_deref().unwrap_or_default(), c.motivation.as_deref().unwrap_or_default(),
-            c.speech_style.as_deref().unwrap_or_default(), c.appearance.as_deref().unwrap_or_default(), c.backstory.as_deref().unwrap_or_default());
-        texts.push((c.id.clone(), "character", content));
+        let content = format!(
+            "角色: {}\n性格: {}\n动机: {}\n说话风格: {}\n外貌: {}\n背景: {}",
+            c.name,
+            c.personality.as_deref().unwrap_or_default(),
+            c.motivation.as_deref().unwrap_or_default(),
+            c.speech_style.as_deref().unwrap_or_default(),
+            c.appearance.as_deref().unwrap_or_default(),
+            c.backstory.as_deref().unwrap_or_default()
+        );
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &c.id,
+            "character",
+            title,
+            content,
+            "{}",
+        ));
     }
-    for l in &bible_data.locations { texts.push((l.id.clone(), "location", l.description.as_deref().unwrap_or_default().to_string())); }
-    for l in &bible_data.world_lore { texts.push((l.id.clone(), "world_lore", l.content.as_deref().unwrap_or_default().to_string())); }
-    for r in &bible_data.canon_rules { texts.push((r.id.clone(), "canon_rule", r.rule_text.as_deref().unwrap_or_default().to_string())); }
-    for pt in &bible_data.plot_threads { texts.push((pt.id.clone(), "plot_thread", pt.description.as_deref().unwrap_or_default().to_string())); }
+    for l in &bible_data.locations {
+        let content = l.description.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &l.id, "location", title, content, "{}",
+        ));
+    }
+    for l in &bible_data.world_lore {
+        let content = l.content.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &l.id,
+            "world_lore",
+            title,
+            content,
+            "{}",
+        ));
+    }
+    for r in &bible_data.canon_rules {
+        let content = r.rule_text.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &r.id,
+            "canon_rule",
+            title,
+            content,
+            "{}",
+        ));
+    }
+    for pt in &bible_data.plot_threads {
+        let content = pt.description.as_deref().unwrap_or_default().to_string();
+        let title = content.chars().take(40).collect::<String>();
+        candidates.push(crate::db::vector_store::VectorIndexCandidate::new(
+            &pt.id,
+            "plot_thread",
+            title,
+            content,
+            "{}",
+        ));
+    }
 
-    // Clear old vectors + rebuild
-    {
-        let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-        conn.execute("DELETE FROM vector_document_metadata WHERE project_id = ?1", rusqlite::params![project_id])
-            .map_err(|e| format!("Clear vectors: {}", e))?;
+    let candidate_count = candidates.len();
+    let pending = crate::db::vector_store::filter_vector_index_candidates(
+        &state.db,
+        &project_id,
+        candidates,
+    )?;
+    let skipped = candidate_count.saturating_sub(pending.len());
+    if pending.is_empty() {
+        add_log(
+            &state,
+            &format!("Vector index already up to date: {} documents", skipped),
+        );
+        return Ok(format!(
+            "Vector index already up to date with {} documents",
+            skipped
+        ));
     }
-    let contents: Vec<String> = texts.iter().map(|(_, _, c)| c.clone()).collect();
-    let embeddings = embed.embed(&contents).await.map_err(|e| format!("Embed: {}", e))?;
+
+    let provider = get_provider(&state)?;
+    let emb_provider = get_embedding_provider(&state).ok();
+    let embed = emb_provider
+        .as_ref()
+        .map(|p| p.as_ref())
+        .unwrap_or(provider.as_ref());
+    let contents: Vec<String> = pending
+        .iter()
+        .map(|candidate| candidate.content.clone())
+        .collect();
+    let embeddings = embed
+        .embed(&contents)
+        .await
+        .map_err(|e| format!("Embed: {}", e))?;
     let mut inserted = 0;
-    for (i, (source_id, source_type, content)) in texts.iter().enumerate() {
+    for (i, candidate) in pending.iter().enumerate() {
         if i < embeddings.len() {
-            let title = content.chars().take(40).collect::<String>();
-            crate::db::vector_store::insert_vector_document(&state.db, &project_id, source_type, Some(source_id), &title, content, "{}", &embeddings[i]).ok();
+            crate::db::vector_store::insert_vector_document(
+                &state.db,
+                &project_id,
+                &candidate.source_type,
+                Some(&candidate.source_id),
+                &candidate.title,
+                &candidate.content,
+                &candidate.metadata,
+                &embeddings[i],
+            )
+            .ok();
             inserted += 1;
         }
     }
-    add_log(&state, &format!("Vector index rebuilt: {} documents", inserted));
-    Ok(format!("Rebuilt vector index with {} documents", inserted))
+    add_log(
+        &state,
+        &format!(
+            "Vector index rebuilt: {} documents embedded, {} unchanged skipped",
+            inserted, skipped
+        ),
+    );
+    Ok(format!(
+        "Rebuilt vector index with {} documents ({} unchanged skipped)",
+        inserted, skipped
+    ))
 }
 
 #[tauri::command]
-async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, text: String, source_title: String, source_type: Option<String>) -> Result<Vec<LearningEntry>, String> {
-    if project_id.is_empty() { return Err("No project selected. Select a project first.".into()); }
+async fn learn_from_text(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    text: String,
+    source_title: String,
+    source_type: Option<String>,
+) -> Result<Vec<LearningEntry>, String> {
+    if project_id.is_empty() {
+        return Err("No project selected. Select a project first.".into());
+    }
     let stype = source_type.as_deref().unwrap_or("manual");
     let provider = get_provider(&state)?;
-    let entries = workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, stype, None).await?;
+    let entries =
+        workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, stype, None)
+            .await?;
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     for entry in &entries {
         let id = Database::new_uuid();
@@ -261,7 +467,10 @@ async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, 
             rusqlite::params![id, project_id, stype, source_title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
         ).map_err(|e| format!("Insert learning: {}", e))?;
     }
-    add_log(&state, &format!("Learned {} patterns from '{}'", entries.len(), source_title));
+    add_log(
+        &state,
+        &format!("Learned {} patterns from '{}'", entries.len(), source_title),
+    );
     Ok(entries)
 }
 
@@ -269,39 +478,73 @@ async fn learn_from_text(state: tauri::State<'_, AppState>, project_id: String, 
 async fn fetch_url_text(url: String) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .build().map_err(|e| format!("Client: {}", e))?;
-    let resp = client.get(&url)
+        .build()
+        .map_err(|e| format!("Client: {}", e))?;
+    let resp = client
+        .get(&url)
         .header("User-Agent", "Mozilla/5.0 (compatible; NovelBot/1.0)")
-        .send().await.map_err(|e| format!("Fetch: {}", e))?;
+        .send()
+        .await
+        .map_err(|e| format!("Fetch: {}", e))?;
     if let Some(len) = resp.content_length() {
-        if len > 5_000_000 { return Err("Page too large".into()); }
+        if len > 5_000_000 {
+            return Err("Page too large".into());
+        }
     }
     let html = resp.text().await.map_err(|e| format!("Read: {}", e))?;
-    if html.len() > 1_000_000 { return Err("Page too large".into()); }
+    if html.len() > 1_000_000 {
+        return Err("Page too large".into());
+    }
     Ok(html)
 }
 
 #[tauri::command]
-async fn get_learning_entries(state: tauri::State<'_, AppState>, project_id: String) -> Result<Vec<LearningEntry>, String> {
+async fn get_learning_entries(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<LearningEntry>, String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let mut stmt = conn.prepare(
         "SELECT id, project_id, source_type, source_url, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence, usage_count, last_used_at, metadata, created_at, updated_at FROM learning_entries WHERE project_id = ?1 ORDER BY created_at DESC"
     ).map_err(|e| format!("Prepare: {}", e))?;
-    let entries = stmt.query_map(rusqlite::params![project_id], |row| Ok(LearningEntry {
-        id: row.get(0)?, project_id: row.get(1)?, source_type: row.get(2)?, source_url: row.get(3)?,
-        source_title: row.get(4)?, category: row.get(5)?, pattern_name: row.get(6)?,
-        pattern_description: row.get(7)?, example_text: row.get(8)?, application_notes: row.get(9)?,
-        confidence: row.get(10)?, usage_count: row.get(11)?, last_used_at: row.get(12)?,
-        metadata: row.get(13)?, created_at: row.get(14)?, updated_at: row.get(15)?,
-    })).map_err(|e| format!("Query: {}", e))?.collect::<Result<Vec<_>, _>>().map_err(|e| format!("Collect: {}", e))?;
+    let entries = stmt
+        .query_map(rusqlite::params![project_id], |row| {
+            Ok(LearningEntry {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                source_type: row.get(2)?,
+                source_url: row.get(3)?,
+                source_title: row.get(4)?,
+                category: row.get(5)?,
+                pattern_name: row.get(6)?,
+                pattern_description: row.get(7)?,
+                example_text: row.get(8)?,
+                application_notes: row.get(9)?,
+                confidence: row.get(10)?,
+                usage_count: row.get(11)?,
+                last_used_at: row.get(12)?,
+                metadata: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+            })
+        })
+        .map_err(|e| format!("Query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect: {}", e))?;
     Ok(entries)
 }
 
 #[tauri::command]
-async fn delete_learning_entry(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+async fn delete_learning_entry(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    conn.execute("DELETE FROM learning_entries WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| format!("Delete: {}", e))?;
+    conn.execute(
+        "DELETE FROM learning_entries WHERE id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| format!("Delete: {}", e))?;
     Ok(())
 }
 
@@ -313,11 +556,19 @@ async fn reset_running(state: tauri::State<'_, AppState>) -> Result<(), String> 
 }
 
 #[tauri::command]
-async fn save_edited_chapter(state: tauri::State<'_, AppState>, chapter_id: String, title: String, body_markdown: String) -> Result<(), String> {
+async fn save_edited_chapter(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+    title: String,
+    body_markdown: String,
+) -> Result<(), String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let chapter = crate::db::chapters::get_chapter(&state.db, &chapter_id)?;
     let last_version = crate::db::chapters::get_latest_version(&state.db, &chapter_id)?;
-    let next_version = last_version.as_ref().map(|v| v.version_number + 1).unwrap_or(2);
+    let next_version = last_version
+        .as_ref()
+        .map(|v| v.version_number + 1)
+        .unwrap_or(2);
     let version_id = Database::new_uuid();
     let word_count = body_markdown.len() as i32;
     conn.execute(
@@ -329,12 +580,24 @@ async fn save_edited_chapter(state: tauri::State<'_, AppState>, chapter_id: Stri
         "UPDATE chapters SET final_version_id = ?1, title = ?2, word_count = ?3, updated_at = datetime('now') WHERE id = ?4",
         rusqlite::params![version_id, title, word_count, chapter_id],
     ).map_err(|e| format!("Update chapter: {}", e))?;
-    add_log(&state, &format!("Chapter {} edited by user (v{})", &chapter_id[..8], next_version));
+    add_log(
+        &state,
+        &format!(
+            "Chapter {} edited by user (v{})",
+            &chapter_id[..8],
+            next_version
+        ),
+    );
     Ok(())
 }
 
 #[tauri::command]
-async fn update_chapter_plan(state: tauri::State<'_, AppState>, id: String, title: String, outline: String) -> Result<(), String> {
+async fn update_chapter_plan(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    title: String,
+    outline: String,
+) -> Result<(), String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     conn.execute(
         "UPDATE chapter_plans SET title = ?1, outline = ?2, updated_at = datetime('now') WHERE id = ?3",
@@ -344,9 +607,15 @@ async fn update_chapter_plan(state: tauri::State<'_, AppState>, id: String, titl
 }
 
 #[tauri::command]
-async fn update_bible_entry(state: tauri::State<'_, AppState>, table: String, id: String, data: String) -> Result<(), String> {
+async fn update_bible_entry(
+    state: tauri::State<'_, AppState>,
+    table: String,
+    id: String,
+    data: String,
+) -> Result<(), String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    let parsed: serde_json::Value = serde_json::from_str(&data).map_err(|e| format!("Invalid JSON: {}", e))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid JSON: {}", e))?;
 
     match table.as_str() {
         "characters" => {
@@ -419,31 +688,92 @@ async fn update_bible_entry(state: tauri::State<'_, AppState>, table: String, id
 }
 
 #[tauri::command]
-async fn retry_chapter(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<RevisionResult, String> {
+async fn retry_chapter(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<RevisionResult, String> {
     let provider = get_provider(&state)?;
     add_log(&state, &format!("Retrying chapter: {}", &chapter_id[..8]));
-    let result = workflow::review_repair::retry_chapter(&state.db, provider.as_ref(), &chapter_id).await?;
+    let result =
+        workflow::review_repair::retry_chapter(&state.db, provider.as_ref(), &chapter_id).await?;
     add_log(&state, &result.message);
     Ok(result)
 }
 
 #[tauri::command]
-async fn get_chapter_plans(state: tauri::State<'_, AppState>, project_id: String) -> Result<Vec<ChapterPlan>, String> {
+async fn get_chapter_plans(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<ChapterPlan>, String> {
     db::chapters::get_chapter_plans(&state.db, &project_id)
 }
 
 #[tauri::command]
-async fn get_chapters(state: tauri::State<'_, AppState>, project_id: String) -> Result<Vec<Chapter>, String> {
+async fn get_next_chapter_context_preview(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    operator_controls: Option<workflow::writing_context::OperatorControls>,
+) -> Result<serde_json::Value, String> {
+    let project = db::projects::get_project(&state.db, &project_id)?;
+    let plan = db::chapters::get_next_chapter_plan(&state.db, &project_id)?
+        .ok_or_else(|| "No planned chapter found. Generate a weekly plan first.".to_string())?;
+    let canon = db::bible::get_bible(&state.db, &project_id)?;
+    let settings = db::settings::get_settings(&state.db)?;
+    let retrieval_query =
+        workflow::writing_context::build_retrieval_query(&plan, operator_controls.as_ref());
+    let mut retrieval_documents = Vec::new();
+
+    if !retrieval_query.trim().is_empty() {
+        if let Ok(embed_client) = get_embedding_provider(&state) {
+            if let Ok(embeddings) = embed_client.embed(&[retrieval_query]).await {
+                if let Some(query_embedding) = embeddings.first() {
+                    retrieval_documents = db::vector_store::search_similar_documents(
+                        &state.db,
+                        &project_id,
+                        query_embedding,
+                        8,
+                    )
+                    .unwrap_or_default();
+                }
+            }
+        }
+    }
+
+    let package = workflow::writing_context::build_writing_context(
+        &state.db,
+        &project,
+        &plan,
+        &canon,
+        &settings,
+        retrieval_documents,
+        operator_controls,
+    )?;
+
+    serde_json::to_value(package).map_err(|e| format!("Serialize context preview: {}", e))
+}
+
+#[tauri::command]
+async fn get_chapters(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<Chapter>, String> {
     db::chapters::get_chapters(&state.db, &project_id)
 }
 
 #[tauri::command]
-async fn get_chapter_versions(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<Vec<ChapterVersion>, String> {
+async fn get_chapter_versions(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<Vec<ChapterVersion>, String> {
     db::chapters::get_chapter_versions(&state.db, &chapter_id)
 }
 
 #[tauri::command]
-async fn read_chapter_file(state: tauri::State<'_, AppState>, project_id: String, filename: String) -> Result<String, String> {
+async fn read_chapter_file(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    filename: String,
+) -> Result<String, String> {
     let settings = db::settings::get_settings(&state.db)?;
     db::chapters::read_chapter_file_content(&settings.data_dir, &project_id, &filename)
 }
@@ -453,13 +783,27 @@ async fn read_chapter_file(state: tauri::State<'_, AppState>, project_id: String
 // ============================================================================
 
 #[tauri::command]
-async fn get_agent_reviews(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<Vec<AgentReview>, String> {
+async fn get_agent_reviews(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<Vec<AgentReview>, String> {
     db::reviews::get_agent_reviews(&state.db, &chapter_id)
 }
 
 #[tauri::command]
-async fn get_review_scores(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<Option<ReviewScores>, String> {
+async fn get_review_scores(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<Option<ReviewScores>, String> {
     db::reviews::get_review_scores(&state.db, &chapter_id)
+}
+
+#[tauri::command]
+async fn get_project_quality_summary(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<ProjectQualitySummary, String> {
+    db::reviews::get_project_quality_summary(&state.db, &project_id)
 }
 
 // ============================================================================
@@ -467,7 +811,10 @@ async fn get_review_scores(state: tauri::State<'_, AppState>, chapter_id: String
 // ============================================================================
 
 #[tauri::command]
-async fn get_generation_jobs(state: tauri::State<'_, AppState>, project_id: String) -> Result<Vec<GenerationJob>, String> {
+async fn get_generation_jobs(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<GenerationJob>, String> {
     db::generation_jobs::get_generation_jobs(&state.db, &project_id)
 }
 
@@ -476,12 +823,23 @@ async fn get_generation_jobs(state: tauri::State<'_, AppState>, project_id: Stri
 // ============================================================================
 
 #[tauri::command]
-async fn run_weekly_arc_planner(state: tauri::State<'_, AppState>, project_id: String) -> Result<WeeklyPlanResult, String> {
+async fn run_weekly_arc_planner(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<WeeklyPlanResult, String> {
     let provider = get_provider(&state)?;
     add_log(&state, "Starting weekly arc planner...");
     let (log_tx, mut log_rx) = mpsc::channel::<String>(100);
-    let result = workflow::weekly_planner::run_weekly_arc_planner(&state.db, provider.as_ref(), &project_id, &log_tx).await?;
-    while let Ok(msg) = log_rx.try_recv() { add_log(&state, &msg); }
+    let result = workflow::weekly_planner::run_weekly_arc_planner(
+        &state.db,
+        provider.as_ref(),
+        &project_id,
+        &log_tx,
+    )
+    .await?;
+    while let Ok(msg) = log_rx.try_recv() {
+        add_log(&state, &msg);
+    }
     add_log(&state, &result.message);
     Ok(result)
 }
@@ -491,24 +849,86 @@ async fn run_weekly_arc_planner(state: tauri::State<'_, AppState>, project_id: S
 // ============================================================================
 
 #[tauri::command]
-async fn get_bible(state: tauri::State<'_, AppState>, project_id: String) -> Result<BibleData, String> {
+async fn get_bible(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<BibleData, String> {
     db::bible::get_bible(&state.db, &project_id)
 }
 
 #[tauri::command]
-async fn ingest_bible_note(state: tauri::State<'_, AppState>, project_id: String, note: String) -> Result<(), String> {
+async fn ingest_bible_note(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    note: String,
+) -> Result<(), String> {
     let provider = get_provider(&state)?;
-    workflow::bible_ingestion::ingest_bible_note(&state.db, provider.as_ref(), &project_id, &note).await
+    workflow::bible_ingestion::ingest_bible_note(&state.db, provider.as_ref(), &project_id, &note)
+        .await
 }
 
 #[tauri::command]
-async fn update_canon_rule(state: tauri::State<'_, AppState>, rule_id: String, locked: bool) -> Result<(), String> {
+async fn update_canon_rule(
+    state: tauri::State<'_, AppState>,
+    rule_id: String,
+    locked: bool,
+) -> Result<(), String> {
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     conn.execute(
         "UPDATE canon_rules SET locked = ?1, updated_at = datetime('now') WHERE id = ?2",
         rusqlite::params![locked as i32, rule_id],
-    ).map_err(|e| format!("Update: {}", e))?;
+    )
+    .map_err(|e| format!("Update: {}", e))?;
     Ok(())
+}
+
+#[tauri::command]
+async fn get_knowledge_graph(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<db::knowledge_graph::KnowledgeGraphSnapshot, String> {
+    db::knowledge_graph::get_snapshot(&state.db, &project_id)
+}
+
+#[tauri::command]
+async fn get_knowledge_graph_neighborhood(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    node_id: String,
+    node_type: String,
+) -> Result<db::knowledge_graph::KnowledgeGraphNeighborhood, String> {
+    db::knowledge_graph::get_node_neighborhood(&state.db, &project_id, &node_id, &node_type)
+}
+
+#[tauri::command]
+async fn create_knowledge_graph_edge(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    source_id: String,
+    source_type: String,
+    target_id: String,
+    target_type: String,
+    edge_type: String,
+    description: Option<String>,
+) -> Result<db::knowledge_graph::KnowledgeGraphEdge, String> {
+    db::knowledge_graph::create_edge(
+        &state.db,
+        &project_id,
+        &source_id,
+        &source_type,
+        &target_id,
+        &target_type,
+        &edge_type,
+        description.as_deref(),
+    )
+}
+
+#[tauri::command]
+async fn delete_knowledge_graph_edge(
+    state: tauri::State<'_, AppState>,
+    edge_id: String,
+) -> Result<(), String> {
+    db::knowledge_graph::delete_edge(&state.db, &edge_id)
 }
 
 // ============================================================================
@@ -521,12 +941,19 @@ async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, 
 }
 
 #[tauri::command]
-async fn update_settings(state: tauri::State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
+async fn update_settings(
+    state: tauri::State<'_, AppState>,
+    settings: AppSettings,
+) -> Result<(), String> {
     db::settings::save_settings(&state.db, &settings)
 }
 
 #[tauri::command]
-async fn set_api_key(state: tauri::State<'_, AppState>, provider: String, key: String) -> Result<(), String> {
+async fn set_api_key(
+    state: tauri::State<'_, AppState>,
+    provider: String,
+    key: String,
+) -> Result<(), String> {
     // Try keychain first (best effort)
     let _ = keychain::store_api_key(&provider, &key);
     // Always save to SQLite as fallback
@@ -567,18 +994,33 @@ async fn test_embedding_provider(
     }
     // Test by calling embedding endpoint
     let client = ai::deepseek::DeepSeekProvider {
-        api_key: api_key.clone(), base_url: base_url.clone(),
-        model: model.clone(), embedding_model: model, timeout_secs: 600,
+        api_key: api_key.clone(),
+        base_url: base_url.clone(),
+        model: model.clone(),
+        embedding_model: model,
+        timeout_secs: 600,
     };
     let start = std::time::Instant::now();
     match client.embed(&["test embedding".to_string()]).await {
         Ok(vecs) if !vecs.is_empty() => Ok(TestResult {
             ok: true,
-            message: format!("OK — {} dimensions, {}ms", vecs[0].len(), start.elapsed().as_millis()),
+            message: format!(
+                "OK — {} dimensions, {}ms",
+                vecs[0].len(),
+                start.elapsed().as_millis()
+            ),
             latency_ms: Some(start.elapsed().as_millis() as u64),
         }),
-        Ok(_) => Ok(TestResult { ok: false, message: "Empty response".into(), latency_ms: None }),
-        Err(e) => Ok(TestResult { ok: false, message: format!("Failed: {}", e), latency_ms: None }),
+        Ok(_) => Ok(TestResult {
+            ok: false,
+            message: "Empty response".into(),
+            latency_ms: None,
+        }),
+        Err(e) => Ok(TestResult {
+            ok: false,
+            message: format!("Failed: {}", e),
+            latency_ms: None,
+        }),
     }
 }
 
@@ -593,8 +1035,12 @@ async fn test_model_provider(
     // Save provider settings to DB
     let mut settings = db::settings::get_settings(&state.db)?;
     settings.provider = provider.clone();
-    if let Some(url) = base_url.clone() { settings.base_url = url; }
-    if let Some(m) = model.clone() { settings.model = m; }
+    if let Some(url) = base_url.clone() {
+        settings.base_url = url;
+    }
+    if let Some(m) = model.clone() {
+        settings.model = m;
+    }
     db::settings::save_settings(&state.db, &settings)?;
 
     // Try to save to keychain (best-effort, don't fail if it doesn't work)
@@ -634,13 +1080,20 @@ async fn test_model_provider(
         }),
         embedding_model: "text-embedding-3-small".into(),
         timeout_secs: 600,
-    }.build()?;
+    }
+    .build()?;
 
     let start = std::time::Instant::now();
-    match client.generate_text("You are a helpful assistant.", "Say 'OK' in one word.", 10).await {
+    match client
+        .generate_text("You are a helpful assistant.", "Say 'OK' in one word.", 10)
+        .await
+    {
         Ok(text) => {
             // Successfully saved and tested — keychain save was best-effort above
-            add_log(&state, &format!("Provider {} connected successfully", provider));
+            add_log(
+                &state,
+                &format!("Provider {} connected successfully", provider),
+            );
             Ok(TestResult {
                 ok: true,
                 message: format!("Connection OK. Response: {}", text),
@@ -660,22 +1113,41 @@ async fn test_model_provider(
 // ============================================================================
 
 #[tauri::command]
-async fn export_markdown(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<String, String> {
+async fn export_markdown(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<String, String> {
     let settings = db::settings::get_settings(&state.db)?;
     export::markdown::export_chapter_markdown(&state.db, &chapter_id, &settings.data_dir)
 }
 
 #[tauri::command]
-async fn publish_blog_draft(state: tauri::State<'_, AppState>, chapter_id: String) -> Result<(), String> {
+async fn publish_blog_draft(
+    state: tauri::State<'_, AppState>,
+    chapter_id: String,
+) -> Result<(), String> {
     let chapter = db::chapters::get_chapter(&state.db, &chapter_id)?;
-    let version = db::chapters::get_latest_version(&state.db, &chapter_id)?
-        .ok_or("No version found")?;
+    let version =
+        db::chapters::get_latest_version(&state.db, &chapter_id)?.ok_or("No version found")?;
     let settings = db::settings::get_settings(&state.db)?;
 
-    let title = version.title.unwrap_or_else(|| format!("Chapter {}", chapter.sequence));
+    let title = version
+        .title
+        .unwrap_or_else(|| format!("Chapter {}", chapter.sequence));
     let slug = title.to_lowercase().replace(' ', "-");
-    db::blog_posts::create_blog_post(&state.db, &chapter.project_id, &chapter_id, &settings.blog_provider, &title, &slug, None)?;
-    add_log(&state, &format!("Blog draft created for chapter {}", &chapter_id[..8]));
+    db::blog_posts::create_blog_post(
+        &state.db,
+        &chapter.project_id,
+        &chapter_id,
+        &settings.blog_provider,
+        &title,
+        &slug,
+        None,
+    )?;
+    add_log(
+        &state,
+        &format!("Blog draft created for chapter {}", &chapter_id[..8]),
+    );
     Ok(())
 }
 
@@ -693,27 +1165,38 @@ async fn get_logs(state: tauri::State<'_, AppState>) -> Result<Vec<String>, Stri
 }
 
 #[tauri::command]
-async fn get_status(state: tauri::State<'_, AppState>, project_id: Option<String>) -> Result<StatusResponse, String> {
+async fn get_status(
+    state: tauri::State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<StatusResponse, String> {
     let id = match project_id {
         Some(ref id) if !id.is_empty() => id.clone(),
-        _ => {
-            match db::projects::get_active_project(&state.db)? {
-                Some(p) => p.id,
-                None => return Ok(StatusResponse {
-                    ok: false, novel: None, slug: None,
-                    chapter_count: None, chapters_today: None, plans_left: None,
-                    total_words: None, is_running: *state.running.lock().unwrap(),
+        _ => match db::projects::get_active_project(&state.db)? {
+            Some(p) => p.id,
+            None => {
+                return Ok(StatusResponse {
+                    ok: false,
+                    novel: None,
+                    slug: None,
+                    chapter_count: None,
+                    chapters_today: None,
+                    plans_left: None,
+                    total_words: None,
+                    is_running: *state.running.lock().unwrap(),
                     daily_schedule: None,
-                }),
+                })
             }
-        }
+        },
     };
 
     if let Ok(stats) = db::projects::get_project_stats(&state.db, &id) {
         let project = db::projects::get_project(&state.db, &id).ok();
         Ok(StatusResponse {
             ok: true,
-            novel: project.as_ref().map(|p| NovelBrief { name: p.name.clone(), genre: p.genre.clone() }),
+            novel: project.as_ref().map(|p| NovelBrief {
+                name: p.name.clone(),
+                genre: p.genre.clone(),
+            }),
             slug: Some(stats.slug),
             chapter_count: Some(stats.chapter_count),
             chapters_today: Some(stats.chapters_today),
@@ -724,9 +1207,14 @@ async fn get_status(state: tauri::State<'_, AppState>, project_id: Option<String
         })
     } else {
         Ok(StatusResponse {
-            ok: false, novel: None, slug: None,
-            chapter_count: None, chapters_today: None, plans_left: None,
-            total_words: None, is_running: *state.running.lock().unwrap(),
+            ok: false,
+            novel: None,
+            slug: None,
+            chapter_count: None,
+            chapters_today: None,
+            plans_left: None,
+            total_words: None,
+            is_running: *state.running.lock().unwrap(),
             daily_schedule: None,
         })
     }
@@ -753,6 +1241,11 @@ pub fn run() {
             let db = Database::open(&db_path)?;
             db::run_migrations(&db)?;
             workflow::lock::cleanup_stale_locks(&db, 600);
+            let _ = db::generation_jobs::recover_stale_running_jobs(
+                &db,
+                600,
+                "Application restarted while this generation job was still running.",
+            );
 
             app.manage(AppState {
                 db,
@@ -766,7 +1259,9 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-                        if let Some(w) = handle.get_webview_window("main") { let _ = w.hide(); }
+                        if let Some(w) = handle.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
                     }
                 });
             }
@@ -777,38 +1272,54 @@ pub fn run() {
                 tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
             };
 
-            let open = MenuItemBuilder::with_id("open", "Open Panel").build(app)?;
-            let write = MenuItemBuilder::with_id("write", "Write Chapter Now").build(app)?;
-            let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+            let open = MenuItemBuilder::with_id("open", "Open AI Novel Factory").build(app)?;
+            let write = MenuItemBuilder::with_id("write", "Open Writing Console").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "Quit Completely").build(app)?;
 
             let menu = MenuBuilder::new(app)
-                .item(&open).item(&write).separator().item(&quit)
+                .item(&open)
+                .item(&write)
+                .separator()
+                .item(&quit)
                 .build()?;
 
-            let _tray = TrayIconBuilder::new()
+            let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("AI Novel Factory")
+                .tooltip("AI Novel Factory - close hides to tray; Quit Completely exits");
+
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            let _tray = tray_builder
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show(); let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
                     "write" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
-                    "quit" => { app.exit(0); }
+                    "quit" => {
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let _ = db::generation_jobs::recover_stale_running_jobs(
+                                &state.db,
+                                0,
+                                "Application quit before this generation job completed.",
+                            );
+                        }
+                        app.exit(0);
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show(); let _ = window.set_focus();
-                        }
+                        show_main_window(app);
                     }
                 })
                 .build(app)?;
@@ -823,16 +1334,22 @@ pub fn run() {
             generate_next_chapter,
             retry_chapter,
             get_chapter_plans,
+            get_next_chapter_context_preview,
             get_chapters,
             get_chapter_versions,
             read_chapter_file,
             get_agent_reviews,
             get_review_scores,
+            get_project_quality_summary,
             get_generation_jobs,
             run_weekly_arc_planner,
             get_bible,
             ingest_bible_note,
             update_canon_rule,
+            get_knowledge_graph,
+            get_knowledge_graph_neighborhood,
+            create_knowledge_graph_edge,
+            delete_knowledge_graph_edge,
             get_settings,
             update_settings,
             set_api_key,

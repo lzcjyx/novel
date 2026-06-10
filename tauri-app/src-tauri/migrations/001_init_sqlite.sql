@@ -591,6 +591,7 @@ CREATE TABLE IF NOT EXISTS vector_document_metadata (
     source_id TEXT,
     title TEXT,
     content TEXT NOT NULL,
+    content_hash TEXT NOT NULL DEFAULT '',
     metadata TEXT NOT NULL DEFAULT '{}',
     embedding BLOB,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

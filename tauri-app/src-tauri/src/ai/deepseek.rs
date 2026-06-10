@@ -1,7 +1,7 @@
+use crate::ai::client::{ModelClient, ModelUsageReport};
+use crate::ai::types::*;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use crate::ai::client::ModelClient;
-use crate::ai::types::*;
 
 pub struct DeepSeekProvider {
     pub api_key: String,
@@ -22,7 +22,13 @@ impl DeepSeekProvider {
         }
     }
 
-    async fn chat(&self, system: &str, user: &str, max_tokens: u32, json_mode: bool) -> Result<String, String> {
+    async fn chat_with_usage(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        json_mode: bool,
+    ) -> Result<(String, Option<ModelUsageReport>), String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .build()
@@ -47,9 +53,13 @@ impl DeepSeekProvider {
             let api_url = if self.base_url.ends_with("/v1") || self.base_url.ends_with("/v1/") {
                 format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
             } else {
-                format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+                format!(
+                    "{}/v1/chat/completions",
+                    self.base_url.trim_end_matches('/')
+                )
             };
-            let resp = client.post(&api_url)
+            let resp = client
+                .post(&api_url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
                 .header("Content-Type", "application/json")
                 .json(&body)
@@ -61,23 +71,53 @@ impl DeepSeekProvider {
             let text = resp.text().await.map_err(|e| format!("Read: {}", e))?;
 
             if status.is_success() {
-                let parsed: ChatCompletionResponse = serde_json::from_str(&text)
-                    .map_err(|e| format!("Parse response: {} — body: {}", e, &text[..text.len().min(500)]))?;
-                return Ok(parsed.choices.first()
+                let parsed: ChatCompletionResponse = serde_json::from_str(&text).map_err(|e| {
+                    format!(
+                        "Parse response: {} — body: {}",
+                        e,
+                        &text[..text.len().min(500)]
+                    )
+                })?;
+                let usage = parsed.usage.map(|usage| ModelUsageReport {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
+                });
+                let content = parsed
+                    .choices
+                    .first()
                     .and_then(|c| c.message.as_ref())
                     .map(|m| m.content.clone())
-                    .unwrap_or_default());
+                    .unwrap_or_default();
+                return Ok((content, usage));
             }
 
             if status.as_u16() == 429 || status.is_server_error() {
                 if attempt < 2 {
-                    tokio::time::sleep(std::time::Duration::from_secs((attempt + 1) as u64 * 2)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs((attempt + 1) as u64 * 2))
+                        .await;
                     continue;
                 }
             }
-            return Err(format!("API error {}: {}", status, &text[..text.len().min(300)]));
+            return Err(format!(
+                "API error {}: {}",
+                status,
+                &text[..text.len().min(300)]
+            ));
         }
         Err("Max retries exceeded".into())
+    }
+
+    async fn chat(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        json_mode: bool,
+    ) -> Result<String, String> {
+        self.chat_with_usage(system, user, max_tokens, json_mode)
+            .await
+            .map(|(content, _usage)| content)
     }
 
     fn extract_json(content: &str) -> Result<Value, String> {
@@ -88,19 +128,26 @@ impl DeepSeekProvider {
         }
         // Strip markdown code blocks robustly
         let cleaned = Self::strip_code_block(content);
-        serde_json::from_str(&cleaned)
-            .map_err(|e| format!("JSON parse error: {} — first 400 chars: {}", e, &cleaned[..cleaned.len().min(400)]))
+        serde_json::from_str(&cleaned).map_err(|e| {
+            format!(
+                "JSON parse error: {} — first 400 chars: {}",
+                e,
+                &cleaned[..cleaned.len().min(400)]
+            )
+        })
     }
 
     fn strip_code_block(s: &str) -> String {
         let s = s.trim();
         // Remove opening ```json or ``` (can be followed by newline)
-        let s = s.strip_prefix("```json")
+        let s = s
+            .strip_prefix("```json")
             .or_else(|| s.strip_prefix("```"))
             .map(|rest| rest.trim_start())
             .unwrap_or(s);
         // Remove closing ```
-        let s = s.strip_suffix("```")
+        let s = s
+            .strip_suffix("```")
             .map(|rest| rest.trim_end())
             .unwrap_or(s);
         s.to_string()
@@ -109,13 +156,44 @@ impl DeepSeekProvider {
 
 #[async_trait]
 impl ModelClient for DeepSeekProvider {
-    async fn generate_json(&self, system: &str, user: &str, _json_schema: &Value, max_tokens: u32) -> Result<Value, String> {
+    async fn generate_json(
+        &self,
+        system: &str,
+        user: &str,
+        _json_schema: &Value,
+        max_tokens: u32,
+    ) -> Result<Value, String> {
         let content = self.chat(system, user, max_tokens, true).await?;
         Self::extract_json(&content)
     }
 
-    async fn generate_text(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    async fn generate_json_with_usage(
+        &self,
+        system: &str,
+        user: &str,
+        _json_schema: &Value,
+        max_tokens: u32,
+    ) -> Result<(Value, Option<ModelUsageReport>), String> {
+        let (content, usage) = self.chat_with_usage(system, user, max_tokens, true).await?;
+        Ok((Self::extract_json(&content)?, usage))
+    }
+
+    async fn generate_text(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, String> {
         self.chat(system, user, max_tokens, false).await
+    }
+
+    async fn generate_text_with_usage(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<(String, Option<ModelUsageReport>), String> {
+        self.chat_with_usage(system, user, max_tokens, false).await
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
@@ -129,11 +207,15 @@ impl ModelClient for DeepSeekProvider {
         } else {
             format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'))
         };
-        let resp = client.post(&emb_url)
+        let resp = client
+            .post(&emb_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&json!({"model": self.embedding_model, "input": texts}))
-            .send().await.map_err(|e| format!("HTTP: {}", e))?
-            .json::<EmbeddingResponse>().await
+            .send()
+            .await
+            .map_err(|e| format!("HTTP: {}", e))?
+            .json::<EmbeddingResponse>()
+            .await
             .map_err(|e| format!("Parse: {}", e))?;
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())

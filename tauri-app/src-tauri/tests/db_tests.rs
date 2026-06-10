@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use rusqlite::Connection;
+use tauri_app_lib::db::connection::Database;
 use tempfile::tempdir;
 
 // Helper: create an in-memory DB with migrations
@@ -9,7 +9,8 @@ fn setup_db() -> (Connection, tempfile::TempDir) {
     let conn = Connection::open(&db_path).unwrap();
 
     // Run migration SQL (simplified for tests — just create the key tables)
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
 
@@ -112,12 +113,88 @@ fn setup_db() -> (Connection, tempfile::TempDir) {
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(project_id, chapter_plan_id, job_date)
         );
-    ").unwrap();
+    ",
+    )
+    .unwrap();
 
     (conn, dir)
 }
 
-fn uuid() -> String { uuid::Uuid::new_v4().to_string() }
+fn uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[test]
+fn migrations_add_content_hash_to_existing_vector_table_before_index() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("old-vector-schema.db");
+    let db = Database::open(&db_path).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE vector_document_metadata (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT,
+                title TEXT,
+                content TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                embedding BLOB,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            INSERT INTO vector_document_metadata
+                (id, project_id, source_type, source_id, title, content, metadata)
+            VALUES
+                ('vec-old', 'project-old', 'chapter', 'chapter-old', 'Old vector', 'legacy vector content', '{}');
+            ",
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+
+    let (has_content_hash, persisted_hash, has_index): (bool, String, bool) = {
+        let conn = db.conn.lock().unwrap();
+        let has_content_hash = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(vector_document_metadata)")
+                .unwrap();
+            let columns = stmt
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            columns.iter().any(|column| column == "content_hash")
+        };
+        let persisted_hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM vector_document_metadata WHERE id = 'vec-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_index = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_vector_docs_content_hash'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1;
+        (has_content_hash, persisted_hash, has_index)
+    };
+
+    assert!(has_content_hash);
+    assert_eq!(
+        persisted_hash,
+        tauri_app_lib::db::vector_store::compute_content_hash("legacy vector content")
+    );
+    assert!(has_index);
+}
 
 #[test]
 fn test_project_crud() {
@@ -129,18 +206,22 @@ fn test_project_crud() {
     conn.execute(
         "INSERT INTO projects (id, name, genre, status) VALUES (?1, ?2, 'fantasy', 'active')",
         rusqlite::params![id, name],
-    ).unwrap();
+    )
+    .unwrap();
 
     // SELECT
-    let result: String = conn.query_row(
-        "SELECT name FROM projects WHERE id = ?1",
-        rusqlite::params![id],
-        |row| row.get(0),
-    ).unwrap();
+    let result: String = conn
+        .query_row(
+            "SELECT name FROM projects WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(result, name);
 
     // DELETE
-    conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![id]).unwrap();
+    conn.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![id])
+        .unwrap();
 }
 
 #[test]
@@ -154,7 +235,8 @@ fn test_chapter_and_version_creation() {
     conn.execute(
         "INSERT INTO projects (id, name) VALUES (?1, 'Test')",
         rusqlite::params![project_id],
-    ).unwrap();
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO chapter_plans (id, project_id, sequence, title) VALUES (?1, ?2, 1, 'Chapter 1')",
         rusqlite::params![plan_id, project_id],
@@ -183,7 +265,8 @@ fn test_chapter_and_version_creation() {
     conn.execute(
         "UPDATE chapters SET final_version_id = ?1 WHERE id = ?2",
         rusqlite::params![version_id, chapter_id],
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 #[test]
@@ -195,11 +278,13 @@ fn test_generation_job_idempotency() {
     conn.execute(
         "INSERT INTO projects (id, name) VALUES (?1, 'Test')",
         rusqlite::params![project_id],
-    ).unwrap();
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO chapter_plans (id, project_id, sequence) VALUES (?1, ?2, 1)",
         rusqlite::params![plan_id, project_id],
-    ).unwrap();
+    )
+    .unwrap();
 
     let job_id = uuid();
     let date = "2026-05-09";
@@ -215,7 +300,10 @@ fn test_generation_job_idempotency() {
         "INSERT INTO generation_jobs (id, project_id, chapter_plan_id, job_date) VALUES (?1, ?2, ?3, ?4)",
         rusqlite::params![uuid(), project_id, plan_id, date],
     );
-    assert!(dup_result.is_err(), "Duplicate generation_job should be rejected");
+    assert!(
+        dup_result.is_err(),
+        "Duplicate generation_job should be rejected"
+    );
 }
 
 #[test]
@@ -224,8 +312,16 @@ fn test_agent_review_crud() {
     let project_id = uuid();
     let chapter_id = uuid();
 
-    conn.execute("INSERT INTO projects (id, name) VALUES (?1, 'Test')", rusqlite::params![project_id]).unwrap();
-    conn.execute("INSERT INTO chapters (id, project_id, sequence, title) VALUES (?1, ?2, 1, 'Ch.1')", rusqlite::params![chapter_id, project_id]).unwrap();
+    conn.execute(
+        "INSERT INTO projects (id, name) VALUES (?1, 'Test')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chapters (id, project_id, sequence, title) VALUES (?1, ?2, 1, 'Ch.1')",
+        rusqlite::params![chapter_id, project_id],
+    )
+    .unwrap();
 
     let review_id = uuid();
     conn.execute(
@@ -233,11 +329,13 @@ fn test_agent_review_crud() {
         rusqlite::params![review_id, project_id, chapter_id],
     ).unwrap();
 
-    let (name, score, pass): (String, i32, i32) = conn.query_row(
-        "SELECT agent_name, score, pass FROM agent_reviews WHERE id = ?1",
-        rusqlite::params![review_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).unwrap();
+    let (name, score, pass): (String, i32, i32) = conn
+        .query_row(
+            "SELECT agent_name, score, pass FROM agent_reviews WHERE id = ?1",
+            rusqlite::params![review_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     assert_eq!(name, "continuity_reviewer");
     assert_eq!(score, 85);
     assert_eq!(pass, 1);

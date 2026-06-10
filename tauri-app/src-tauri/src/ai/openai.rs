@@ -1,7 +1,7 @@
+use super::deepseek::DeepSeekProvider;
+use crate::ai::client::{ModelClient, ModelUsageReport};
 use async_trait::async_trait;
-use serde_json::Value;
-use crate::ai::client::ModelClient;
-use super::deepseek::DeepSeekProvider; // Same API shape, reuse implementation approach
+use serde_json::Value; // Same API shape, reuse implementation approach
 
 pub struct OpenAIProvider {
     pub api_key: String,
@@ -28,7 +28,13 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl ModelClient for OpenAIProvider {
-    async fn generate_json(&self, system: &str, user: &str, _json_schema: &Value, max_tokens: u32) -> Result<Value, String> {
+    async fn generate_json(
+        &self,
+        system: &str,
+        user: &str,
+        _json_schema: &Value,
+        max_tokens: u32,
+    ) -> Result<Value, String> {
         let deepseek = DeepSeekProvider {
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
@@ -36,10 +42,36 @@ impl ModelClient for OpenAIProvider {
             embedding_model: self.embedding_model.clone(),
             timeout_secs: self.timeout_secs,
         };
-        deepseek.generate_json(system, user, _json_schema, max_tokens).await
+        deepseek
+            .generate_json(system, user, _json_schema, max_tokens)
+            .await
     }
 
-    async fn generate_text(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    async fn generate_json_with_usage(
+        &self,
+        system: &str,
+        user: &str,
+        json_schema: &Value,
+        max_tokens: u32,
+    ) -> Result<(Value, Option<ModelUsageReport>), String> {
+        let deepseek = DeepSeekProvider {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            embedding_model: self.embedding_model.clone(),
+            timeout_secs: self.timeout_secs,
+        };
+        deepseek
+            .generate_json_with_usage(system, user, json_schema, max_tokens)
+            .await
+    }
+
+    async fn generate_text(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, String> {
         let deepseek = DeepSeekProvider {
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
@@ -48,6 +80,24 @@ impl ModelClient for OpenAIProvider {
             timeout_secs: self.timeout_secs,
         };
         deepseek.generate_text(system, user, max_tokens).await
+    }
+
+    async fn generate_text_with_usage(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<(String, Option<ModelUsageReport>), String> {
+        let deepseek = DeepSeekProvider {
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            embedding_model: self.embedding_model.clone(),
+            timeout_secs: self.timeout_secs,
+        };
+        deepseek
+            .generate_text_with_usage(system, user, max_tokens)
+            .await
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
