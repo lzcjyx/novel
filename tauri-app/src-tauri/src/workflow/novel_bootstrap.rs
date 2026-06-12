@@ -1,6 +1,6 @@
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
-use crate::db::projects;
+use crate::db::{chapters, knowledge_graph, projects};
 use crate::models::*;
 use crate::prompts;
 use crate::workflow::prompt_rendering;
@@ -41,6 +41,20 @@ pub async fn bootstrap_novel(
     )?;
     log(log_tx, &format!("Project created: {}", &project.id[..8]));
 
+    let project_id = project.id.clone();
+    match bootstrap_after_project_created(db, provider, input, project, log_tx).await {
+        Ok(project) => Ok(project),
+        Err(reason) => Err(cleanup_partial_project(db, &project_id, reason)),
+    }
+}
+
+async fn bootstrap_after_project_created(
+    db: &Database,
+    provider: &dyn ModelClient,
+    input: &CreateProjectInput,
+    project: Project,
+    log_tx: &mpsc::Sender<String>,
+) -> Result<Project, String> {
     // 2. Create paper directory
     let settings = crate::db::settings::get_settings(db)?;
     let slug = projects::slugify(&project.id);
@@ -102,18 +116,98 @@ pub async fn bootstrap_novel(
         }
         Err(e) => {
             log(log_tx, &format!("Bible generation failed: {}", e));
-            return Ok(project); // Return project even if bible fails
+            return Err(format!("Bible generation failed: {}", e));
         }
     };
 
     // 4. Insert bible records
     insert_bible_records(db, &project.id, &bible, log_tx)?;
 
-    // 5. Build vector index for retrieval (use embedding provider if available)
+    // 5. Validate required bootstrap artifacts before returning success.
+    validate_bootstrap_artifacts(db, &project.id)?;
+
+    // 6. Build vector index for retrieval (use embedding provider if available)
     embed_and_index_bible(db, provider, &project.id, log_tx).await;
 
     log(log_tx, "=== Bootstrap complete ===");
     Ok(project)
+}
+
+fn cleanup_partial_project(db: &Database, project_id: &str, reason: String) -> String {
+    let mut cleanup_errors = Vec::new();
+    let cleanup_dirs = crate::db::settings::get_settings(db)
+        .and_then(|settings| {
+            projects::project_paper_dirs_for_cleanup(db, project_id, &settings.data_dir)
+        })
+        .unwrap_or_default();
+
+    if let Err(e) = projects::delete_project(db, project_id) {
+        cleanup_errors.push(format!("delete project: {}", e));
+    }
+
+    for dir in cleanup_dirs {
+        if std::path::Path::new(&dir).exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                cleanup_errors.push(format!("delete paper dir {}: {}", dir, e));
+            }
+        }
+    }
+
+    if cleanup_errors.is_empty() {
+        reason
+    } else {
+        format!("{}; cleanup failed: {}", reason, cleanup_errors.join("; "))
+    }
+}
+
+fn validate_bootstrap_artifacts(db: &Database, project_id: &str) -> Result<(), String> {
+    let bible_data = crate::db::bible::get_bible(db, project_id)?;
+    let plans = chapters::get_chapter_plans(db, project_id)?;
+    let graph = knowledge_graph::get_snapshot(db, project_id)?;
+    let mut missing = Vec::new();
+
+    if bible_data.characters.len() < 6 {
+        missing.push(format!("characters {} < 6", bible_data.characters.len()));
+    }
+    if bible_data.locations.len() < 4 {
+        missing.push(format!("locations {} < 4", bible_data.locations.len()));
+    }
+    if bible_data.organizations.len() < 2 {
+        missing.push(format!(
+            "organizations {} < 2",
+            bible_data.organizations.len()
+        ));
+    }
+    if bible_data.world_lore.is_empty() {
+        missing.push("world_lore 0 < 1".into());
+    }
+    if bible_data.magic_systems.is_empty() {
+        missing.push("magic_systems 0 < 1".into());
+    }
+    if bible_data.canon_rules.len() < 5 {
+        missing.push(format!("canon_rules {} < 5", bible_data.canon_rules.len()));
+    }
+    if bible_data.plot_threads.len() < 3 {
+        missing.push(format!(
+            "plot_threads {} < 3",
+            bible_data.plot_threads.len()
+        ));
+    }
+    if plans.len() != 10 {
+        missing.push(format!("chapter_plans {} != 10", plans.len()));
+    }
+    if graph.nodes.is_empty() {
+        missing.push("graph_nodes 0 < 1".into());
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Bootstrap validation failed: {}",
+            missing.join(", ")
+        ))
+    }
 }
 
 pub async fn embed_and_index_bible(
@@ -266,10 +360,11 @@ fn insert_bible_records(
             .and_then(|v| v.as_str())
             .map(|t| format!("{} Style", t))
             .unwrap_or_else(|| "Default Style Guide".into());
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO style_guides (id, project_id, name, style_text) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![id, project_id, name, style_text],
-        );
+        )
+        .map_err(|e| format!("Insert style guide: {}", e))?;
     }
 
     // Characters
@@ -280,10 +375,11 @@ fn insert_bible_records(
             let role = c.get("role").and_then(|v| v.as_str());
             let personality = c.get("personality").and_then(|v| v.as_str());
             let backstory = c.get("backstory").and_then(|v| v.as_str());
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO characters (id, project_id, name, role, personality, backstory) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 rusqlite::params![id, project_id, name, role, personality, backstory],
-            );
+            )
+            .map_err(|e| format!("Insert character: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} characters", arr.len()));
     }
@@ -295,10 +391,11 @@ fn insert_bible_records(
             let name = loc["name"].as_str().unwrap_or("Unknown");
             let desc = loc.get("description").and_then(|v| v.as_str());
             let loc_type = loc.get("type").and_then(|v| v.as_str());
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO locations (id, project_id, name, description, type) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![id, project_id, name, desc, loc_type],
-            );
+            )
+            .map_err(|e| format!("Insert location: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} locations", arr.len()));
     }
@@ -309,10 +406,11 @@ fn insert_bible_records(
             let id = Database::new_uuid();
             let name = org["name"].as_str().unwrap_or("Unknown");
             let desc = org.get("description").and_then(|v| v.as_str());
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO organizations (id, project_id, name, description) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![id, project_id, name, desc],
-            );
+            )
+            .map_err(|e| format!("Insert organization: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} organizations", arr.len()));
     }
@@ -323,10 +421,11 @@ fn insert_bible_records(
             let id = Database::new_uuid();
             let name = item["name"].as_str().unwrap_or("Unknown");
             let desc = item.get("description").and_then(|v| v.as_str());
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO items (id, project_id, name, description) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![id, project_id, name, desc],
-            );
+            )
+            .map_err(|e| format!("Insert item: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} items", arr.len()));
     }
@@ -334,10 +433,11 @@ fn insert_bible_records(
     // World Overview → world_lore (lore_type = "world_history")
     if let Some(world) = bible.get("world_overview").and_then(|v| v.as_str()) {
         let id = Database::new_uuid();
-        let _ = conn.execute(
+        conn.execute(
             "INSERT OR IGNORE INTO world_lore (id, project_id, lore_type, title, content) VALUES (?1, ?2, 'world_history', 'World Overview', ?3)",
             rusqlite::params![id, project_id, world],
-        );
+        )
+        .map_err(|e| format!("Insert world lore: {}", e))?;
     }
 
     // Power system → both magic_or_power_systems AND world_lore
@@ -352,16 +452,18 @@ fn insert_bible_records(
                 "{}\n\nRules: {}\n\nLimitations: {}\n\nProgression: {}",
                 desc, rules, limits, progression
             );
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO magic_or_power_systems (id, project_id, name, description, rules, limitations, progression) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![id, project_id, name, desc, rules, limits, progression],
-            );
+            )
+            .map_err(|e| format!("Insert magic system: {}", e))?;
             // Also insert as world_lore for vector search
             let lore_id = Database::new_uuid();
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO world_lore (id, project_id, lore_type, title, content) VALUES (?1, ?2, 'power_system', ?3, ?4)",
                 rusqlite::params![lore_id, project_id, name, full_desc],
-            );
+            )
+            .map_err(|e| format!("Insert power system lore: {}", e))?;
         }
     }
 
@@ -375,10 +477,11 @@ fn insert_bible_records(
                 .get("severity")
                 .and_then(|v| v.as_str())
                 .unwrap_or("hard");
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO canon_rules (id, project_id, rule_type, rule_text, severity, locked) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
                 rusqlite::params![id, project_id, rule_type, rule_text, severity],
-            );
+            )
+            .map_err(|e| format!("Insert canon rule: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} canon rules", arr.len()));
     }
@@ -396,10 +499,11 @@ fn insert_bible_records(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let priority = thread.get("priority").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
-            let _ = conn.execute(
+            conn.execute(
                 "INSERT OR IGNORE INTO plot_threads (id, project_id, name, description, priority, arc_status) VALUES (?1, ?2, ?3, ?4, ?5, 'open')",
                 rusqlite::params![id, project_id, name, desc, priority],
-            );
+            )
+            .map_err(|e| format!("Insert plot thread: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} plot threads", arr.len()));
     }
@@ -410,10 +514,15 @@ fn insert_bible_records(
             let id = Database::new_uuid();
             let title = plan.get("title").and_then(|v| v.as_str());
             let outline = plan.get("outline").and_then(|v| v.as_str());
-            let _ = conn.execute(
-                "INSERT OR IGNORE INTO chapter_plans (id, project_id, sequence, title, outline, status) VALUES (?1, ?2, ?3, ?4, ?5, 'planned')",
-                rusqlite::params![id, project_id, (i + 1) as i32, title, outline],
-            );
+            let target_word_count = plan
+                .get("target_word_count")
+                .and_then(|v| v.as_i64())
+                .map(|value| value as i32);
+            conn.execute(
+                "INSERT OR IGNORE INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'planned')",
+                rusqlite::params![id, project_id, (i + 1) as i32, title, outline, target_word_count],
+            )
+            .map_err(|e| format!("Insert chapter plan: {}", e))?;
         }
         log(log_tx, &format!("Inserted {} chapter plans", arr.len()));
     }
