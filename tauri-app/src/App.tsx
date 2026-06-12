@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, createContext, useContext, useRef } from "react";
+import { useState, useEffect, useCallback, createContext, useContext, useRef, useMemo, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
 
 // ---- Types ----
 interface ProjectStats { id: string; name: string; slug: string; genre?: string; status: string; target_words?: number; chapter_count: number; total_words: number; plans_left: number; chapters_today: number; created_at: string; }
@@ -1141,6 +1142,11 @@ function KnowledgeGraphPage() {
   const [neighborhoodStatus, setNeighborhoodStatus] = useState("");
   const [edgeForm, setEdgeForm] = useState({ sourceId: "", targetId: "", edgeType: "related_to", description: "" });
   const [message, setMessage] = useState("");
+  const [manualPositions, setManualPositions] = useState<Record<string, GraphPosition>>({});
+  const [flowTick, setFlowTick] = useState(0);
+  const [draggingNodeId, setDraggingNodeId] = useState("");
+  const graphCanvasRef = useRef<HTMLElement | null>(null);
+  const draggingNodeRef = useRef<{ id: string; pointerId: number } | null>(null);
 
   const loadGraph = useCallback(async () => {
     if (!selected) {
@@ -1196,6 +1202,7 @@ function KnowledgeGraphPage() {
   });
   const visibleIds = new Set(visibleNodes.map(node => node.id));
   const visibleEdges = edges.filter(edge => visibleIds.has(edge.source_node_id) && visibleIds.has(edge.target_node_id));
+  const visibleNodeKey = visibleNodes.map(node => `${node.node_type}:${node.id}:${node.degree}`).sort().join("|");
   const selectedNode = nodeById.get(selectedNodeId) || visibleNodes[0];
   const selectedNodeKey = selectedNode ? `${selectedNode.node_type}:${selectedNode.id}` : "";
   const connectedEdges = selectedNode
@@ -1250,26 +1257,75 @@ function KnowledgeGraphPage() {
     return () => { cancelled = true; };
   }, [selected, selectedNodeKey]);
 
-  const positions = (() => {
-    const byType = new Map<string, KnowledgeGraphNode[]>();
+  const basePositions = useMemo(
+    () => createGraphBasePositions(visibleNodes),
+    [visibleNodeKey],
+  );
+  const positions = useMemo(() => {
+    const map = new Map<string, GraphPosition>();
     for (const node of visibleNodes) {
-      byType.set(node.node_type, [...(byType.get(node.node_type) || []), node]);
+      const base = manualPositions[node.id] || basePositions[node.id] || { x: 50, y: 50 };
+      const position = manualPositions[node.id] || draggingNodeId === node.id
+        ? clampGraphPosition(base)
+        : flowGraphPosition(node, base, flowTick);
+      map.set(node.id, position);
     }
-    const map = new Map<string, { x: number; y: number }>();
-    const orderedTypes = Array.from(byType.keys()).sort();
-    orderedTypes.forEach((type, typeIndex) => {
-      const group = byType.get(type) || [];
-      const radius = 18 + Math.min(typeIndex, 5) * 7;
-      group.forEach((node, index) => {
-        const angle = ((index / Math.max(group.length, 1)) * Math.PI * 2) + (typeIndex * 0.58);
-        map.set(node.id, {
-          x: 50 + Math.cos(angle) * radius,
-          y: 50 + Math.sin(angle) * Math.min(radius * 0.82, 35),
-        });
-      });
-    });
     return map;
-  })();
+  }, [visibleNodes, visibleNodeKey, manualPositions, basePositions, draggingNodeId, flowTick]);
+
+  useEffect(() => {
+    setManualPositions(prev => {
+      const next: Record<string, GraphPosition> = {};
+      for (const node of visibleNodes) {
+        if (prev[node.id]) next[node.id] = prev[node.id];
+      }
+      return next;
+    });
+  }, [visibleNodeKey]);
+
+  useEffect(() => {
+    if (!selected || !visibleNodes.length) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduceMotion) return;
+    let frame = 0;
+    const startedAt = performance.now();
+    const animate = (timestamp: number) => {
+      setFlowTick((timestamp - startedAt) / 1000);
+      frame = window.requestAnimationFrame(animate);
+    };
+    frame = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frame);
+  }, [selected, visibleNodeKey]);
+
+  const updateDragPosition = useCallback((event: { clientX: number; clientY: number }) => {
+    const dragging = draggingNodeRef.current;
+    const canvas = graphCanvasRef.current;
+    if (!dragging || !canvas) return;
+    const next = positionFromClientPoint(canvas.getBoundingClientRect(), event.clientX, event.clientY);
+    setManualPositions(prev => ({ ...prev, [dragging.id]: next }));
+  }, []);
+
+  const handleNodePointerDown = (event: ReactPointerEvent<HTMLButtonElement>, node: KnowledgeGraphNode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedNodeId(node.id);
+    draggingNodeRef.current = { id: node.id, pointerId: event.pointerId };
+    setDraggingNodeId(node.id);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateDragPosition(event);
+  };
+
+  const stopDragging = useCallback((pointerId?: number) => {
+    if (pointerId !== undefined && draggingNodeRef.current?.pointerId !== pointerId) return;
+    draggingNodeRef.current = null;
+    setDraggingNodeId("");
+  }, []);
+
+  const handleCanvasPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+    if (!draggingNodeRef.current) return;
+    event.preventDefault();
+    updateDragPosition(event);
+  };
 
   const createEdge = async () => {
     if (!selected) return;
@@ -1338,7 +1394,14 @@ function KnowledgeGraphPage() {
         </div>
 
         <div className="graph-layout">
-          <section className="graph-canvas">
+          <section
+            ref={graphCanvasRef}
+            className="graph-canvas"
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={event => stopDragging(event.pointerId)}
+            onPointerCancel={event => stopDragging(event.pointerId)}
+            onPointerLeave={() => stopDragging()}
+          >
             <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Knowledge graph relationships">
               {visibleEdges.map((edge, edgeIndex) => {
                 const source = positions.get(edge.source_node_id);
@@ -1365,9 +1428,10 @@ function KnowledgeGraphPage() {
               return (
                 <button
                   key={node.id}
-                  className={`graph-node graph-node-${node.node_type} ${selectedNode?.id === node.id ? "active" : ""}`}
+                  className={`graph-node graph-node-${node.node_type} ${selectedNode?.id === node.id ? "active" : ""} ${draggingNodeId === node.id ? "dragging" : ""}`}
                   style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
-                  onClick={() => setSelectedNodeId(node.id)}
+                  onPointerDown={event => handleNodePointerDown(event, node)}
+                  onClick={event => { event.stopPropagation(); setSelectedNodeId(node.id); }}
                   title={`${node.label} (${typeLabel(node.node_type)})`}
                   aria-label={`${node.label}, ${typeLabel(node.node_type)}, ${node.degree} relationships`}
                   aria-pressed={selectedNode?.id === node.id}

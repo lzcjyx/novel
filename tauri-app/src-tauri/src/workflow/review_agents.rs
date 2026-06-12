@@ -285,6 +285,26 @@ fn json_field_or_empty(output: &serde_json::Value, keys: &[&str]) -> String {
     "[]".to_string()
 }
 
+fn review_metadata(agent_name: &str, output: &serde_json::Value) -> String {
+    if agent_name != "publication_reviewer" {
+        return "{}".to_string();
+    }
+
+    let blog_metadata = output
+        .get("blog_metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    serde_json::json!({
+        "blog_metadata": blog_metadata,
+        "publication_interface": {
+            "provider_kind": "local_draft",
+            "target": "blog",
+            "external_publish_ready": false
+        }
+    })
+    .to_string()
+}
+
 async fn run_single_review(
     provider: &dyn ModelClient,
     agent_name: &str,
@@ -394,7 +414,7 @@ async fn run_single_review(
         minor_issues: minor,
         recommendations,
         raw_output: output.to_string(),
-        metadata: "{}".into(),
+        metadata: review_metadata(agent_name, &output),
         created_at: String::new(),
         updated_at: String::new(),
     })

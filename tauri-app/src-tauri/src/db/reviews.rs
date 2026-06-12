@@ -18,6 +18,28 @@ fn average(values: &[f64]) -> Option<f64> {
     }
 }
 
+fn metadata_from_raw_review(agent_name: &str, raw_output: &str) -> String {
+    if agent_name != "publication_reviewer" {
+        return "{}".to_string();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw_output) else {
+        return "{}".to_string();
+    };
+    let blog_metadata = value
+        .get("blog_metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    serde_json::json!({
+        "blog_metadata": blog_metadata,
+        "publication_interface": {
+            "provider_kind": "local_draft",
+            "target": "blog",
+            "external_publish_ready": false
+        }
+    })
+    .to_string()
+}
+
 pub fn save_agent_review(
     db: &Database,
     project_id: &str,
@@ -32,12 +54,13 @@ pub fn save_agent_review(
     raw_output: &str,
 ) -> Result<String, String> {
     let id = Database::new_uuid();
+    let metadata = metadata_from_raw_review(agent_name, raw_output);
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     conn.execute(
-        "INSERT INTO agent_reviews (id, project_id, chapter_id, chapter_version_id, agent_name, score, pass, blocking_issues, minor_issues, recommendations, raw_output)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO agent_reviews (id, project_id, chapter_id, chapter_version_id, agent_name, score, pass, blocking_issues, minor_issues, recommendations, raw_output, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![id, project_id, chapter_id, chapter_version_id, agent_name, score, pass as i32,
-            blocking_issues, minor_issues, recommendations, raw_output],
+            blocking_issues, minor_issues, recommendations, raw_output, metadata],
     ).map_err(|e| format!("Insert review: {}", e))?;
     Ok(id)
 }

@@ -150,9 +150,7 @@ impl tauri_app_lib::ai::client::ModelClient for MockProvider {
         schema: &Value,
         max_tokens: u32,
     ) -> Result<(Value, Option<tauri_app_lib::ai::client::ModelUsageReport>), String> {
-        let value = self
-            .generate_json(system, user, schema, max_tokens)
-            .await?;
+        let value = self.generate_json(system, user, schema, max_tokens).await?;
         let usage = if system.contains("writing_context")
             || system.contains("顶尖中文网文职业写手")
             || system.contains("draft")

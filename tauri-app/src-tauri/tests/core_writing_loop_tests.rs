@@ -372,6 +372,31 @@ fn chapter_plan_can_be_marked_completed() {
     assert_eq!(plans[0].status, "completed");
 }
 
+#[test]
+fn project_stats_plans_left_counts_only_unwritten_planned_plans() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, status)
+         VALUES ('plan-written', ?1, 1, '已写章节', '已经产出章节但等待人工复核', 'in_progress')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chapters (id, project_id, chapter_plan_id, sequence, title, status, word_count, summary)
+         VALUES ('chapter-written', ?1, 'plan-written', 1, '已写章节', 'needs_human_review', 1200, '等待人工复核')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let stats = tauri_app_lib::db::projects::get_project_stats(&db, &project_id).unwrap();
+
+    assert_eq!(stats.chapter_count, 1);
+    assert_eq!(stats.plans_left, 0);
+}
+
 #[derive(Default)]
 struct CapturingProvider {
     systems: Arc<Mutex<Vec<String>>>,
@@ -537,6 +562,95 @@ async fn reviewer_preserves_high_score_from_wrapped_json_output() {
 
     assert_eq!(continuity.score, Some(95));
     assert_eq!(continuity.pass, Some(true));
+}
+
+#[tokio::test]
+async fn publication_reviewer_metadata_is_preserved_for_publish_drafts() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let chapter = review_chapter(&project_id);
+    let version = review_version(&project_id);
+    let canon = empty_review_canon();
+    let provider = CapturingProvider {
+        review_text: Some(
+            r#"{"score":91,"pass":true,"blocking_issues":[],"minor_issues":[],"blog_metadata":{"title":"雨夜旧案","slug":"rain-night-case","excerpt":"钥匙与旧站台引出第一条线索。","tags":["悬疑","连载"],"category":"小说连载","seo_description":"雨夜旧案章节发布草稿。","status_recommendation":"draft"},"recommendations":[]}"#
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    let reviews = review_agents::run_review_agents(&provider, &chapter, &version, &canon, &project)
+        .await
+        .expect("publication metadata review should parse");
+    let publication = reviews
+        .iter()
+        .find(|review| review.agent_name == "publication_reviewer")
+        .expect("publication review should be present");
+    let metadata: Value =
+        serde_json::from_str(&publication.metadata).expect("metadata should be json");
+
+    assert_eq!(
+        metadata["blog_metadata"]["slug"].as_str(),
+        Some("rain-night-case")
+    );
+    assert_eq!(
+        metadata["publication_interface"]["provider_kind"].as_str(),
+        Some("local_draft")
+    );
+}
+
+#[test]
+fn local_blog_draft_uses_latest_publication_review_metadata() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapters (id, project_id, sequence, title, status, word_count, summary)
+         VALUES ('chapter-publish', ?1, 1, '雨夜旧案', 'final', 1200, '章节摘要')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chapter_versions
+         (id, chapter_id, project_id, version_number, version_type, title, body_markdown, summary, word_count)
+         VALUES ('version-publish', 'chapter-publish', ?1, 1, 'final', '雨夜旧案', '正文。', '章节摘要', 1200)",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE chapters SET final_version_id = 'version-publish' WHERE id = 'chapter-publish'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agent_reviews
+         (id, project_id, chapter_id, chapter_version_id, agent_name, score, pass, blocking_issues, minor_issues, recommendations, raw_output)
+         VALUES ('review-publication', ?1, 'chapter-publish', 'version-publish', 'publication_reviewer', 91, 1, '[]', '[]', '[]', ?2)",
+        rusqlite::params![
+            project_id,
+            r#"{"score":91,"pass":true,"blocking_issues":[],"minor_issues":[],"blog_metadata":{"title":"雨夜旧案","slug":"rain-night-case","excerpt":"钥匙与旧站台引出第一条线索。","tags":["悬疑","连载"],"category":"小说连载","seo_description":"雨夜旧案章节发布草稿。","status_recommendation":"draft"},"recommendations":[]}"#
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let post_id = tauri_app_lib::create_local_blog_draft(&db, "chapter-publish")
+        .expect("local blog draft should be created");
+    let posts = tauri_app_lib::db::blog_posts::get_blog_posts(&db, &project_id).unwrap();
+    let post = posts.iter().find(|post| post.id == post_id).unwrap();
+    let metadata: Value = serde_json::from_str(&post.metadata).unwrap();
+
+    assert_eq!(post.title.as_deref(), Some("雨夜旧案"));
+    assert_eq!(post.slug.as_deref(), Some("rain-night-case"));
+    assert_eq!(
+        metadata["publication_metadata"]["excerpt"].as_str(),
+        Some("钥匙与旧站台引出第一条线索。")
+    );
+    assert_eq!(
+        metadata["publication_interface"]["target"].as_str(),
+        Some("blog")
+    );
 }
 
 #[tokio::test]
@@ -912,4 +1026,127 @@ async fn human_review_generation_keeps_plan_in_progress() {
     assert_eq!(result.decision.as_deref(), Some("needs_human_review"));
     let plans = tauri_app_lib::db::chapters::get_chapter_plans(&db, &project_id).unwrap();
     assert_eq!(plans[0].status, "in_progress");
+}
+
+#[test]
+fn human_edit_save_keeps_runtime_read_paths_available() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+         VALUES ('plan-human-save', ?1, 1, '待审旧名', '生成后进入人工复核', 3000, 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+         VALUES ('plan-after-save', ?1, 2, '下一章', '继续旧名后果', 3000, 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO learning_entries
+         (id, project_id, source_type, source_title, category, pattern_name, pattern_description, confidence)
+         VALUES ('learn-after-save', ?1, 'manual', '样章', 'style_pattern', '冷硬物件', '用物件承载压力', 0.91)",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (chapter_id, _version_id) = tauri_app_lib::db::chapters::save_draft_version(
+        &db,
+        &project_id,
+        "plan-human-save",
+        1,
+        "待审旧名",
+        "初稿正文。门后旧名需要人工确认。",
+        18,
+        "初稿摘要",
+        "test",
+        "test-model",
+        "prompt",
+        "context",
+    )
+    .unwrap();
+    tauri_app_lib::db::generation_jobs::create_generation_job(&db, &project_id, "plan-after-save")
+        .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chapters SET status = 'needs_human_review' WHERE id = ?1",
+            rusqlite::params![chapter_id],
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::save_human_edited_chapter(
+        &db,
+        &chapter_id,
+        "待审旧名 修订",
+        "人工保存后的正文仍然可被后续上下文读取。",
+    )
+    .expect("human edit should save without blocking read paths");
+
+    let latest = tauri_app_lib::db::chapters::get_latest_version(&db, &chapter_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.version_type, "revised");
+    assert!(latest
+        .body_markdown
+        .as_deref()
+        .unwrap_or("")
+        .contains("人工保存后的正文"));
+
+    assert_eq!(
+        tauri_app_lib::db::chapters::get_chapters(&db, &project_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        tauri_app_lib::db::chapters::get_chapter_plans(&db, &project_id)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(tauri_app_lib::db::bible::get_bible(&db, &project_id)
+        .unwrap()
+        .characters
+        .is_empty());
+    let graph = tauri_app_lib::db::knowledge_graph::get_snapshot(&db, &project_id).unwrap();
+    assert!(graph.nodes.is_empty());
+    assert_eq!(
+        tauri_app_lib::workflow::learning::get_top_learning_entries(&db, &project_id, 8)
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let plan = tauri_app_lib::db::chapters::get_next_chapter_plan(&db, &project_id)
+        .unwrap()
+        .expect("next planned chapter should remain available");
+    let canon = tauri_app_lib::db::bible::get_bible(&db, &project_id).unwrap();
+    let settings = tauri_app_lib::db::settings::get_settings(&db).unwrap();
+    let package = tauri_app_lib::workflow::writing_context::build_writing_context(
+        &db,
+        &project,
+        &plan,
+        &canon,
+        &settings,
+        vec![],
+        None,
+    )
+    .unwrap();
+    let context_json = serde_json::to_value(package).unwrap();
+    assert!(context_json["continuity"]["recent_body_excerpts"]
+        .to_string()
+        .contains("人工保存后的正文"));
 }

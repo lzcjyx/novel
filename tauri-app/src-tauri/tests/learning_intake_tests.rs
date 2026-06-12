@@ -41,6 +41,52 @@ impl ModelClient for PromptCaptureProvider {
     }
 }
 
+struct AliasKnowledgeProvider;
+
+#[async_trait]
+impl ModelClient for AliasKnowledgeProvider {
+    async fn generate_json(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _json_schema: &Value,
+        _max_tokens: u32,
+    ) -> Result<Value, String> {
+        Ok(json!([
+            {
+                "type": "style",
+                "name": "object-carried tension",
+                "description": "Uses a concrete object instead of direct emotion labels.",
+                "notes": "Apply when a scene needs pressure without exposition."
+            },
+            {
+                "category": "dialogue",
+                "title": "unfinished answer",
+                "summary": "Lets a character stop before the key noun, keeping the exchange tense.",
+                "application": "Use in interrogations and reveals."
+            },
+            {
+                "category": "plot",
+                "name": "   ",
+                "description": ""
+            }
+        ]))
+    }
+
+    async fn generate_text(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _max_tokens: u32,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+    }
+}
+
 #[test]
 fn rejects_private_or_unsafe_learning_urls() {
     assert!(learning_intake::normalize_learning_url("file:///C:/Users/me/.env").is_err());
@@ -124,4 +170,34 @@ async fn extract_knowledge_truncates_multibyte_input_safely() {
     assert_eq!(prompts.len(), 1);
     assert!(prompts[0].contains("分析以下文本"));
     assert!(prompts[0].chars().count() < chinese_text.chars().count() + 30);
+}
+
+#[tokio::test]
+async fn learning_extraction_accepts_alias_fields_and_skips_empty_items() {
+    let provider = AliasKnowledgeProvider;
+
+    let entries = learning::extract_knowledge(
+        &provider,
+        "The witness turns the key twice and says only half the answer.",
+        "Alias sample",
+        "manual_file",
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].category, "style_pattern");
+    assert_eq!(entries[0].pattern_name, "object-carried tension");
+    assert!(entries[0].pattern_description.contains("concrete object"));
+    assert_eq!(
+        entries[0].application_notes.as_deref(),
+        Some("Apply when a scene needs pressure without exposition.")
+    );
+    assert_eq!(entries[1].category, "dialogue_style");
+    assert_eq!(entries[1].pattern_name, "unfinished answer");
+    assert!(entries[1].pattern_description.contains("key noun"));
+    assert!(entries
+        .iter()
+        .all(|entry| entry.pattern_name != "Unknown" && !entry.pattern_description.is_empty()));
 }
