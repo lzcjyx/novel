@@ -11,12 +11,25 @@ pub fn create_blog_post(
     slug: &str,
     url: Option<&str>,
 ) -> Result<String, String> {
+    create_blog_post_with_metadata(db, project_id, chapter_id, provider, title, slug, url, "{}")
+}
+
+pub fn create_blog_post_with_metadata(
+    db: &Database,
+    project_id: &str,
+    chapter_id: &str,
+    provider: &str,
+    title: &str,
+    slug: &str,
+    url: Option<&str>,
+    metadata: &str,
+) -> Result<String, String> {
     let id = Database::new_uuid();
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     conn.execute(
-        "INSERT OR IGNORE INTO blog_posts (id, project_id, chapter_id, provider, title, slug, url, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'draft')",
-        params![id, project_id, chapter_id, provider, title, slug, url],
+        "INSERT OR IGNORE INTO blog_posts (id, project_id, chapter_id, provider, title, slug, url, status, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'draft', ?8)",
+        params![id, project_id, chapter_id, provider, title, slug, url, metadata],
     ).map_err(|e| format!("Create blog post: {}", e))?;
     Ok(id)
 }

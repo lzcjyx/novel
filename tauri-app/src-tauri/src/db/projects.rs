@@ -129,10 +129,13 @@ pub fn get_project_stats(db: &Database, id: &str) -> Result<ProjectStats, String
         )
         .unwrap_or(0);
 
-    let plans_left: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM chapter_plans WHERE project_id = ?1 AND status IN ('planned','in_progress')",
-        params![id], |r| r.get(0),
-    ).unwrap_or(0);
+    let plans_left: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chapter_plans WHERE project_id = ?1 AND status = 'planned'",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let chapters_today: i32 = conn

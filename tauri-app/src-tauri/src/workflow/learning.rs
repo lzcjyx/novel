@@ -2,6 +2,93 @@ use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
 use crate::models::*;
 use crate::workflow::learning_intake;
+use serde_json::Value;
+
+fn first_non_empty_string(item: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        item.get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn normalize_learning_category(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "plot" | "plot_pattern" | "story" | "structure" => "plot_pattern",
+        "character" | "character_archetype" | "characterization" => "character_archetype",
+        "dialogue" | "dialogue_style" | "voice" => "dialogue_style",
+        "style" | "style_pattern" | "prose" | "language" => "style_pattern",
+        "pacing" | "pacing_pattern" | "rhythm" => "pacing_pattern",
+        "improvement" | "improvement_note" | "self_reflection" => "improvement_note",
+        "narrative" | "narrative_device" | "device" => "narrative_device",
+        _ => "narrative_device",
+    }
+    .to_string()
+}
+
+fn learning_entry_from_json(
+    item: &Value,
+    source_title: &str,
+    source_type: &str,
+    source_url: Option<&str>,
+) -> Option<LearningEntry> {
+    let pattern_name = first_non_empty_string(
+        item,
+        &["pattern_name", "name", "title", "pattern", "technique"],
+    )?;
+    if pattern_name.eq_ignore_ascii_case("unknown") {
+        return None;
+    }
+    let pattern_description = first_non_empty_string(
+        item,
+        &[
+            "pattern_description",
+            "description",
+            "summary",
+            "explanation",
+        ],
+    )?;
+    let category = first_non_empty_string(item, &["category", "type", "kind"])
+        .map(|value| normalize_learning_category(&value))
+        .unwrap_or_else(|| "narrative_device".to_string());
+    let application_notes = first_non_empty_string(
+        item,
+        &[
+            "application_notes",
+            "application",
+            "apply",
+            "usage",
+            "notes",
+            "note",
+        ],
+    );
+
+    Some(LearningEntry {
+        id: String::new(),
+        project_id: String::new(),
+        source_type: source_type.into(),
+        source_url: source_url.map(|s| s.into()),
+        source_title: Some(source_title.into()),
+        category,
+        pattern_name,
+        pattern_description,
+        example_text: first_non_empty_string(item, &["example_text", "example", "evidence"]),
+        application_notes,
+        confidence: item
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .unwrap_or(0.7)
+            .clamp(0.0, 1.0),
+        usage_count: 0,
+        last_used_at: None,
+        metadata: "{}".into(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    })
+}
 
 pub async fn extract_knowledge(
     provider: &dyn ModelClient,
@@ -12,7 +99,8 @@ pub async fn extract_knowledge(
 ) -> Result<Vec<LearningEntry>, String> {
     let system = format!(
         "从文本中提取3-5个最突出的写作技巧。每个技巧用50-100字简要说明即可。\n\
-         类别：plot(情节), character(人物), dialogue(对话), style(文风), pacing(节奏)\n\
+         category 只能使用：plot_pattern, character_archetype, dialogue_style, style_pattern, pacing_pattern, narrative_device。\n\
+         每项必须包含 pattern_name 和 pattern_description；可选 example_text 与 application_notes。\n\
          输出JSON数组。来源：{}",
         source_title
     );
@@ -30,6 +118,7 @@ pub async fn extract_knowledge(
                 "category": {"type": "string"},
                 "pattern_name": {"type": "string"},
                 "pattern_description": {"type": "string"},
+                "example_text": {"type": "string"},
                 "application_notes": {"type": "string"}
             },
             "required": ["category", "pattern_name", "pattern_description"]
@@ -45,27 +134,7 @@ pub async fn extract_knowledge(
 
     let entries: Vec<LearningEntry> = arr
         .iter()
-        .map(|item| LearningEntry {
-            id: String::new(),
-            project_id: String::new(),
-            source_type: source_type.into(),
-            source_url: source_url.map(|s| s.into()),
-            source_title: Some(source_title.into()),
-            category: item["category"]
-                .as_str()
-                .unwrap_or("narrative_device")
-                .into(),
-            pattern_name: item["pattern_name"].as_str().unwrap_or("Unknown").into(),
-            pattern_description: item["pattern_description"].as_str().unwrap_or("").into(),
-            example_text: item["example_text"].as_str().map(|s| s.into()),
-            application_notes: item["application_notes"].as_str().map(|s| s.into()),
-            confidence: 0.7,
-            usage_count: 0,
-            last_used_at: None,
-            metadata: "{}".into(),
-            created_at: String::new(),
-            updated_at: String::new(),
-        })
+        .filter_map(|item| learning_entry_from_json(item, source_title, source_type, source_url))
         .collect();
 
     Ok(entries)

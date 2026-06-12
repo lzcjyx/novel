@@ -34,6 +34,154 @@ fn add_log(state: &AppState, msg: &str) {
     }
 }
 
+pub fn save_human_edited_chapter(
+    db: &Database,
+    chapter_id: &str,
+    title: &str,
+    body_markdown: &str,
+) -> Result<i32, String> {
+    let chapter = crate::db::chapters::get_chapter(db, chapter_id)?;
+    let last_version = crate::db::chapters::get_latest_version(db, chapter_id)?;
+    let next_version = last_version
+        .as_ref()
+        .map(|v| v.version_number + 1)
+        .unwrap_or(2);
+    let version_id = Database::new_uuid();
+    let word_count = body_markdown.chars().count() as i32;
+
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    conn.execute(
+        "INSERT INTO chapter_versions (id, chapter_id, project_id, version_number, version_type, title, body_markdown, word_count, created_by_agent)
+         VALUES (?1, ?2, ?3, ?4, 'revised', ?5, ?6, ?7, 'human_editor')",
+        rusqlite::params![version_id, chapter_id, chapter.project_id, next_version, title, body_markdown, word_count],
+    ).map_err(|e| format!("Insert edited version: {}", e))?;
+    conn.execute(
+        "UPDATE chapters SET final_version_id = ?1, title = ?2, word_count = ?3, updated_at = datetime('now') WHERE id = ?4",
+        rusqlite::params![version_id, title, word_count, chapter_id],
+    ).map_err(|e| format!("Update chapter: {}", e))?;
+
+    Ok(next_version)
+}
+
+fn simple_slug(title: &str) -> String {
+    let slug = title
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch
+            } else if ch.is_whitespace() || ch == '-' || ch == '_' {
+                '-'
+            } else {
+                '\0'
+            }
+        })
+        .filter(|ch| *ch != '\0')
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "chapter-draft".to_string()
+    } else {
+        slug
+    }
+}
+
+fn latest_publication_metadata(
+    db: &Database,
+    chapter_id: &str,
+) -> Result<serde_json::Value, String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let result = conn.query_row(
+        "SELECT metadata, raw_output FROM agent_reviews
+         WHERE chapter_id = ?1 AND agent_name = 'publication_reviewer'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        rusqlite::params![chapter_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    );
+    let (metadata_raw, raw_output) = match result {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(serde_json::json!({})),
+        Err(e) => return Err(format!("Get publication review metadata: {}", e)),
+    };
+    drop(conn);
+
+    let metadata = serde_json::from_str::<serde_json::Value>(&metadata_raw).unwrap_or_default();
+    if metadata.get("blog_metadata").is_some() {
+        return Ok(metadata);
+    }
+
+    let raw = serde_json::from_str::<serde_json::Value>(&raw_output).unwrap_or_default();
+    let blog_metadata = raw
+        .get("blog_metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    Ok(serde_json::json!({
+        "blog_metadata": blog_metadata,
+        "publication_interface": {
+            "provider_kind": "local_draft",
+            "target": "blog",
+            "external_publish_ready": false
+        }
+    }))
+}
+
+pub fn create_local_blog_draft(db: &Database, chapter_id: &str) -> Result<String, String> {
+    let chapter = db::chapters::get_chapter(db, chapter_id)?;
+    let version = db::chapters::get_latest_version(db, chapter_id)?.ok_or("No version found")?;
+    let settings = db::settings::get_settings(db)?;
+    let publication = latest_publication_metadata(db, chapter_id)?;
+    let blog_metadata = publication
+        .get("blog_metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let fallback_title = version
+        .title
+        .clone()
+        .or_else(|| chapter.title.clone())
+        .unwrap_or_else(|| format!("Chapter {}", chapter.sequence));
+    let title = blog_metadata
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&fallback_title)
+        .to_string();
+    let slug = blog_metadata
+        .get("slug")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| simple_slug(&title));
+    let provider = settings.blog_provider.as_str();
+    let metadata = serde_json::json!({
+        "publication_metadata": blog_metadata,
+        "publication_interface": {
+            "target": "blog",
+            "provider": provider,
+            "provider_kind": "local_draft",
+            "external_publish_ready": false
+        }
+    })
+    .to_string();
+
+    db::blog_posts::create_blog_post_with_metadata(
+        db,
+        &chapter.project_id,
+        chapter_id,
+        provider,
+        &title,
+        &slug,
+        None,
+        &metadata,
+    )
+}
+
 pub fn project_is_running(
     db: &Database,
     memory_running: bool,
@@ -697,24 +845,7 @@ async fn save_edited_chapter(
     title: String,
     body_markdown: String,
 ) -> Result<(), String> {
-    let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    let chapter = crate::db::chapters::get_chapter(&state.db, &chapter_id)?;
-    let last_version = crate::db::chapters::get_latest_version(&state.db, &chapter_id)?;
-    let next_version = last_version
-        .as_ref()
-        .map(|v| v.version_number + 1)
-        .unwrap_or(2);
-    let version_id = Database::new_uuid();
-    let word_count = body_markdown.len() as i32;
-    conn.execute(
-        "INSERT INTO chapter_versions (id, chapter_id, project_id, version_number, version_type, title, body_markdown, word_count, created_by_agent)
-         VALUES (?1, ?2, ?3, ?4, 'revised', ?5, ?6, ?7, 'human_editor')",
-        rusqlite::params![version_id, chapter_id, chapter.project_id, next_version, title, body_markdown, word_count],
-    ).map_err(|e| format!("Insert edited version: {}", e))?;
-    conn.execute(
-        "UPDATE chapters SET final_version_id = ?1, title = ?2, word_count = ?3, updated_at = datetime('now') WHERE id = ?4",
-        rusqlite::params![version_id, title, word_count, chapter_id],
-    ).map_err(|e| format!("Update chapter: {}", e))?;
+    let next_version = save_human_edited_chapter(&state.db, &chapter_id, &title, &body_markdown)?;
     add_log(
         &state,
         &format!(
@@ -1261,24 +1392,7 @@ async fn publish_blog_draft(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
 ) -> Result<(), String> {
-    let chapter = db::chapters::get_chapter(&state.db, &chapter_id)?;
-    let version =
-        db::chapters::get_latest_version(&state.db, &chapter_id)?.ok_or("No version found")?;
-    let settings = db::settings::get_settings(&state.db)?;
-
-    let title = version
-        .title
-        .unwrap_or_else(|| format!("Chapter {}", chapter.sequence));
-    let slug = title.to_lowercase().replace(' ', "-");
-    db::blog_posts::create_blog_post(
-        &state.db,
-        &chapter.project_id,
-        &chapter_id,
-        &settings.blog_provider,
-        &title,
-        &slug,
-        None,
-    )?;
+    create_local_blog_draft(&state.db, &chapter_id)?;
     add_log(
         &state,
         &format!("Blog draft created for chapter {}", &chapter_id[..8]),
