@@ -5,6 +5,15 @@ import assert from "node:assert/strict";
 const css = readFileSync(new URL("./index.css", import.meta.url), "utf8");
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const tauriConfig = readFileSync(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8");
+const capabilities = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/default.json", import.meta.url), "utf8"));
+const requiredWindowPermissions = [
+  "core:window:allow-start-dragging",
+  "core:window:allow-minimize",
+  "core:window:allow-is-maximized",
+  "core:window:allow-maximize",
+  "core:window:allow-unmaximize",
+  "core:window:allow-hide",
+];
 
 test("fluent shell tokens replace the old dark gold shell", () => {
   assert.match(css, /--accent:\s*#0067c0/i);
@@ -50,4 +59,36 @@ test("fluent titlebar CSS defines stable WinUI-style window controls", () => {
   assert.match(css, /\.window-control/);
   assert.match(css, /width:\s*46px/);
   assert.match(css, /\.window-control-close:hover/);
+});
+
+test("custom titlebar has Tauri window permissions and does not make controls draggable", () => {
+  const config = JSON.parse(tauriConfig);
+  assert.equal(config.app.windows[0].decorations, false);
+  for (const permission of requiredWindowPermissions) {
+    assert.ok(capabilities.permissions.includes(permission), `${permission} permission missing`);
+  }
+  assert.doesNotMatch(app, /<header className="app-titlebar" data-tauri-drag-region>/);
+  assert.match(app, /handleTitlebarDrag/);
+  assert.match(app, /\.startDragging\(\)/);
+  assert.match(app, /className="titlebar-drag-zone"[\s\S]*data-tauri-drag-region/);
+  assert.doesNotMatch(app, /className="window-controls" data-tauri-drag-region/);
+});
+
+test("graph nodes render compact canvas content while preserving labels off-canvas", () => {
+  assert.match(app, /const graphNodeInitial/);
+  assert.match(app, /className="graph-node-initial"/);
+  assert.match(app, /className="graph-node-degree"/);
+  assert.doesNotMatch(app, /<span>\{node\.label\}<\/span>/);
+  assert.match(app, /title=\{\`\$\{node\.label\}/);
+  assert.match(app, /aria-label=\{\`\$\{node\.label\}/);
+});
+
+test("graph workbench uses light Fluent graph tokens", () => {
+  assert.match(css, /\.graph-canvas\s*\{[\s\S]*var\(--surface-solid\)/);
+  assert.match(css, /\.graph-edge-base\s*\{[\s\S]*rgba\(0,\s*0,\s*0,\s*0\.\d+\)/);
+  assert.match(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*var\(--accent\)/);
+  assert.match(css, /\.graph-node\s*\{[\s\S]*var\(--control-fill\)/);
+  assert.match(css, /\.graph-node-initial/);
+  assert.match(css, /\.graph-node-degree/);
+  assert.doesNotMatch(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*208,\s*168,\s*92/);
 });

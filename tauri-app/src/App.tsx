@@ -173,13 +173,20 @@ function App() {
     await getCurrentWindow().hide();
   };
 
+  const handleTitlebarDrag = async (event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    await getCurrentWindow().startDragging();
+  };
+
   return (
     <Ctx.Provider value={ctx}>
       <div className="app-shell">
-        <header className="app-titlebar" data-tauri-drag-region>
-          <div className="titlebar-brand" data-tauri-drag-region>
-            <span className="titlebar-app-mark" aria-hidden="true">A</span>
-            <span className="titlebar-title" data-tauri-drag-region>AI Novel Factory</span>
+        <header className="app-titlebar">
+          <div className="titlebar-drag-zone" data-tauri-drag-region onPointerDown={handleTitlebarDrag}>
+            <div className="titlebar-brand" data-tauri-drag-region>
+              <span className="titlebar-app-mark" aria-hidden="true">A</span>
+              <span className="titlebar-title" data-tauri-drag-region>AI Novel Factory</span>
+            </div>
           </div>
           <div className="window-controls">
             <button type="button" className="window-control" aria-label="Minimize window" onClick={handleMinimizeWindow}>
@@ -1257,6 +1264,13 @@ function KnowledgeGraphPage() {
   const nodeById = new Map(nodes.map(node => [node.id, node]));
   const types = Array.from(new Set(nodes.map(node => node.node_type))).sort();
   const typeLabel = (type: string) => type.replace(/_/g, " ");
+  const graphNodeInitial = (type: string) =>
+    type
+      .split("_")
+      .map(part => part[0] || "")
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "N";
   const query = search.trim().toLowerCase();
   const visibleNodes = nodes.filter(node => {
     const matchesType = typeFilter === "all" || node.node_type === typeFilter;
@@ -1500,8 +1514,8 @@ function KnowledgeGraphPage() {
                   aria-pressed={selectedNode?.id === node.id}
                   type="button"
                 >
-                  <span>{node.label}</span>
-                  <em>{node.degree}</em>
+                  <span className="graph-node-initial" aria-hidden="true">{graphNodeInitial(node.node_type)}</span>
+                  <span className="graph-node-degree" aria-hidden="true">{node.degree}</span>
                 </button>
               );
             })}
