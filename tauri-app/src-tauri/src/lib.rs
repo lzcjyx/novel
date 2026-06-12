@@ -832,9 +832,34 @@ async fn delete_learning_entry(
 }
 
 #[tauri::command]
-async fn reset_running(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn reset_running(
+    state: tauri::State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<(), String> {
+    let recovered = match project_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(project_id) => db::generation_jobs::recover_project_interrupted_jobs(
+            &state.db,
+            project_id,
+            "operator reset stuck job",
+        )?,
+        None => db::generation_jobs::recover_interrupted_generation_jobs(
+            &state.db,
+            0,
+            "operator reset stuck job",
+        )?,
+    };
     *state.running.lock().unwrap() = false;
-    add_log(&state, "Running flag manually reset.");
+    add_log(
+        &state,
+        &format!(
+            "Running flag reset; recovered {} interrupted job(s).",
+            recovered
+        ),
+    );
     Ok(())
 }
 
@@ -1493,7 +1518,7 @@ pub fn run() {
             let db = Database::open(&db_path)?;
             db::run_migrations(&db)?;
             workflow::lock::cleanup_stale_locks(&db, 600);
-            let _ = db::generation_jobs::recover_stale_running_jobs(
+            let _ = db::generation_jobs::recover_interrupted_generation_jobs(
                 &db,
                 600,
                 "Application restarted while this generation job was still running.",
@@ -1553,7 +1578,7 @@ pub fn run() {
                     }
                     "quit" => {
                         if let Some(state) = app.try_state::<AppState>() {
-                            let _ = db::generation_jobs::recover_stale_running_jobs(
+                            let _ = db::generation_jobs::recover_interrupted_generation_jobs(
                                 &state.db,
                                 0,
                                 "Application quit before this generation job completed.",

@@ -5,7 +5,8 @@ use crate::export::markdown;
 use crate::models::*;
 use crate::prompts;
 use crate::workflow::{
-    canon_updater, learning, lock, prompt_rendering, review_agents, review_arbiter, writing_context,
+    canon_updater, learning, lock, prompt_rendering, review_agents, review_arbiter,
+    task_transaction, writing_context,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -143,12 +144,39 @@ fn build_context_metadata(context: &writing_context::WritingContextPackage) -> s
         .iter()
         .map(|source| source.document_id.clone())
         .collect::<Vec<_>>();
+    let selected_learning_entries = context
+        .learned_patterns
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.id,
+                "category": entry.category,
+                "pattern_name": entry.pattern_name,
+                "source_type": entry.source_type,
+                "confidence": entry.confidence,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_learning_entry_ids = context
+        .learned_patterns
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<Vec<_>>();
+    let learning_context_hash = {
+        let payload = serde_json::to_string(&selected_learning_entries).unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(payload);
+        hex::encode(hasher.finalize())
+    };
 
     serde_json::json!({
         "selected_retrieval_source_keys": selected_retrieval_source_keys,
         "selected_retrieval_document_ids": selected_retrieval_document_ids,
         "retrieval_trace": context.retrieval_trace,
         "graph_context": context.graph_context,
+        "selected_learning_entry_ids": selected_learning_entry_ids,
+        "selected_learning_entries": selected_learning_entries,
+        "learning_context_hash": learning_context_hash,
     })
 }
 
@@ -260,6 +288,7 @@ pub async fn generate_next_chapter(
 
     // 6. Create generation job (idempotent)
     let job_id = generation_jobs::create_generation_job(db, project_id, &plan.id)?;
+    task_transaction::begin_generation_task_snapshot(db, &job_id, project_id, &plan.id)?;
     log(log_tx, &format!("Job created: {}", &job_id[..8]));
     let _ = generation_jobs::record_job_phase_event(db, &job_id, "acquire_lock", "done", None, 3.0);
 
@@ -361,6 +390,7 @@ pub async fn generate_next_chapter(
         .iter()
         .map(|entry| entry.id.clone())
         .collect::<Vec<_>>();
+    generation_jobs::record_job_learning_context(db, &job_id, &used_learning_ids)?;
     let writing_context_json = serde_json::to_string_pretty(&writing_context).unwrap_or_default();
 
     let prompt_hash = {
@@ -489,6 +519,8 @@ pub async fn generate_next_chapter(
         &prompt_hash,
         &prompt_hash,
     )?;
+    task_transaction::record_task_owned_row(db, &job_id, "chapters", &chapter_id)?;
+    task_transaction::record_task_owned_row(db, &job_id, "chapter_versions", &version_id)?;
     let context_metadata = build_context_metadata(&writing_context);
     chapters::update_chapter_version_metadata(db, &version_id, &context_metadata)?;
 
@@ -497,6 +529,7 @@ pub async fn generate_next_chapter(
         &format!("Draft saved: {} ({} words)", &chapter_id[..8], word_count),
     );
     if !used_learning_ids.is_empty() {
+        task_transaction::record_learning_entry_usage_snapshot(db, &job_id, &used_learning_ids)?;
         learning::mark_learning_entries_used(db, &used_learning_ids)?;
     }
     emit_preview(event_tx, "draft_preview", &title, &body, "draft", 38.0);
@@ -603,7 +636,13 @@ pub async fn generate_next_chapter(
                 &review.recommendations,
                 &review.raw_output,
             ) {
-                Ok(_) => {
+                Ok(review_id) => {
+                    task_transaction::record_task_owned_row(
+                        db,
+                        &job_id,
+                        "agent_reviews",
+                        &review_id,
+                    )?;
                     saved = true;
                     break;
                 }
@@ -662,7 +701,7 @@ pub async fn generate_next_chapter(
         65.0,
     );
 
-    let _ = reviews::save_review_scores(
+    let review_score_id = reviews::save_review_scores(
         db,
         project_id,
         &chapter_id,
@@ -672,7 +711,8 @@ pub async fn generate_next_chapter(
         &aggregation.decision,
         aggregation.publish_allowed,
         aggregation.blocking_issue_count,
-    );
+    )?;
+    task_transaction::record_task_owned_row(db, &job_id, "review_scores", &review_score_id)?;
 
     // 15. Revise loop: keep revising until score >= threshold or retries exhausted
     let mut revise_count = 0;
@@ -794,6 +834,12 @@ pub async fn generate_next_chapter(
                         rusqlite::params![rev_version_id, chapter_id, project_id, 1 + revise_count, title, rev_body, rev_wc, settings.provider, settings.model],
                     ).map_err(|e| format!("Insert revision: {}", e))?;
                 }
+                task_transaction::record_task_owned_row(
+                    db,
+                    &job_id,
+                    "chapter_versions",
+                    &rev_version_id,
+                )?;
                 let _ = chapters::update_chapter_after_revision(
                     db,
                     &chapter_id,
@@ -853,7 +899,7 @@ pub async fn generate_next_chapter(
                             review.pass.unwrap_or(false)
                         ),
                     );
-                    let _ = reviews::save_agent_review(
+                    let review_id = reviews::save_agent_review(
                         db,
                         project_id,
                         &chapter_id,
@@ -865,7 +911,13 @@ pub async fn generate_next_chapter(
                         &review.minor_issues,
                         &review.recommendations,
                         &review.raw_output,
-                    );
+                    )?;
+                    task_transaction::record_task_owned_row(
+                        db,
+                        &job_id,
+                        "agent_reviews",
+                        &review_id,
+                    )?;
                 }
                 current_aggregation = review_arbiter::aggregate_reviews(
                     &current_reviews,
@@ -938,7 +990,7 @@ pub async fn generate_next_chapter(
             if project.auto_publish && final_decision == "publish_ready" {
                 log(log_tx, "Generating blog metadata...");
                 let provider_name = project.blog_provider.as_deref().unwrap_or("local");
-                let _ = blog_posts::create_blog_post(
+                let blog_id = blog_posts::create_blog_post(
                     db,
                     project_id,
                     &chapter_id,
@@ -946,7 +998,8 @@ pub async fn generate_next_chapter(
                     &final_title,
                     "",
                     None,
-                );
+                )?;
+                task_transaction::record_task_owned_row(db, &job_id, "blog_posts", &blog_id)?;
             }
             Some(path)
         }
@@ -967,6 +1020,7 @@ pub async fn generate_next_chapter(
         project_id,
         &chapter_id,
         &current_draft,
+        Some(&job_id),
     )
     .await
     {

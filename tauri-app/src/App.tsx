@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, createContext, useContext, useRef, useMemo, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
 
 // ---- Types ----
@@ -125,6 +126,19 @@ function App() {
     dashboard: "Dashboard", projects: "Projects", chapters: "Chapters",
     plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", graph: "Graph", learn: "Learn", settings: "Settings",
   };
+  const navIcon: Record<string, string> = {
+    dashboard: "D",
+    projects: "P",
+    chapters: "C",
+    plans: "L",
+    reviews: "R",
+    jobs: "J",
+    bible: "B",
+    graph: "G",
+    learn: "K",
+    settings: "S",
+  };
+  const selectedProject = projects.find(project => project.id === selected);
 
   const renderPage = () => {
     switch (page) {
@@ -142,24 +156,73 @@ function App() {
     }
   };
 
+  const handleMinimizeWindow = async () => {
+    await getCurrentWindow().minimize();
+  };
+
+  const handleToggleMaximizeWindow = async () => {
+    const currentWindow = getCurrentWindow();
+    if (await currentWindow.isMaximized()) {
+      await currentWindow.unmaximize();
+    } else {
+      await currentWindow.maximize();
+    }
+  };
+
+  const handleCloseToTray = async () => {
+    await getCurrentWindow().hide();
+  };
+
   return (
     <Ctx.Provider value={ctx}>
-      <div className="app-layout">
-        <div className="app-sidebar">
-          <div className="sidebar-brand">AI Novel Factory</div>
-          {Object.keys(navLabels).map(p => (
-            <button key={p} className={`sidebar-nav-btn ${page === p ? "active" : ""}`} onClick={() => setPage(p)}>
-              {navLabels[p]}
+      <div className="app-shell">
+        <header className="app-titlebar" data-tauri-drag-region>
+          <div className="titlebar-brand" data-tauri-drag-region>
+            <span className="titlebar-app-mark" aria-hidden="true">A</span>
+            <span className="titlebar-title" data-tauri-drag-region>AI Novel Factory</span>
+          </div>
+          <div className="window-controls">
+            <button type="button" className="window-control" aria-label="Minimize window" onClick={handleMinimizeWindow}>
+              <span className="window-glyph window-glyph-minimize" aria-hidden="true" />
             </button>
-          ))}
-          <select className="sidebar-select" value={selected} onChange={e => setSelected(e.target.value)}>
-            <option value="">-- Select Project --</option>
-            {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+            <button type="button" className="window-control" aria-label="Maximize or restore window" onClick={handleToggleMaximizeWindow}>
+              <span className="window-glyph window-glyph-maximize" aria-hidden="true" />
+            </button>
+            <button type="button" className="window-control window-control-close" aria-label="Close to tray" onClick={handleCloseToTray}>
+              <span className="window-glyph window-glyph-close" aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+        <div className="app-navigation-view">
+          <aside className="navigation-pane">
+            <div className="navigation-brand">AI Novel Factory</div>
+            {Object.keys(navLabels).map(p => (
+              <button key={p} className={`navigation-item ${page === p ? "active" : ""}`} onClick={() => setPage(p)} aria-current={page === p ? "page" : undefined}>
+                <span className="nav-icon" aria-hidden="true">{navIcon[p]}</span>
+                <span>{navLabels[p]}</span>
+              </button>
+            ))}
+            <select className="sidebar-select navigation-project-select" value={selected} onChange={e => setSelected(e.target.value)} aria-label="Selected project">
+              <option value="">-- Select Project --</option>
+              {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </aside>
+          <section className="app-frame">
+            <div className="app-command-bar">
+              <div className="command-context">
+                <span className="command-kicker">{navLabels[page]}</span>
+                <strong>{selectedProject?.name || "No project selected"}</strong>
+              </div>
+              <div className="info-bar" data-state={status?.is_running ? "running" : "ready"} role="status">
+                <span className="info-dot" aria-hidden="true" />
+                <span>{status?.is_running ? "Generation running" : "Ready"}</span>
+              </div>
+            </div>
+            <main className="app-main">
+              {renderPage()}
+            </main>
+          </section>
         </div>
-        <main className="app-main">
-          {renderPage()}
-        </main>
       </div>
     </Ctx.Provider>
   );
@@ -435,7 +498,7 @@ function Dashboard() {
           <div className="action-row">
             <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>Write With Controls</button>
             <button className="btn btn-secondary" onClick={handleWeekly} disabled={loading || !selected}>Generate Weekly Plan</button>
-            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await invoke("reset_running"); }}>Reset Stuck Job</button>}
+            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await invoke("reset_running", { projectId: selected }); }}>Reset Stuck Job</button>}
           </div>
         </section>
 
@@ -1743,6 +1806,8 @@ function LearnPage() {
     sentence_structure:"var(--success)", pacing_technique:"#2196f3", description_method:"#9c27b0",
     narrative_device:"#00bcd4", improvement_note:"var(--warning)",
   };
+  const sourceMarkerLabel = (sourceType?: string) =>
+    sourceType === "web" ? "Web" : sourceType === "self_reflection" ? "Review" : "File";
 
   return (
     <>
@@ -1786,7 +1851,12 @@ function LearnPage() {
                 <div>
                   <span className="chapter-title">{e.pattern_name}</span>
                   <span className="badge badge-active" style={{marginLeft:8}}>{e.category}</span>
-                  <span className="text-meta" style={{marginLeft:8}}>{e.source_type === "web" ? "🌐" : e.source_type === "self_reflection" ? "🔄" : "📝"} {e.source_title}</span>
+                  <span className="text-meta source-meta" style={{marginLeft:8}}>
+                    <span className={`source-marker source-marker-${e.source_type || "file"}`} aria-hidden="true">
+                      {sourceMarkerLabel(e.source_type)}
+                    </span>
+                    {e.source_title}
+                  </span>
                 </div>
                 <button className="btn btn-sm btn-danger" onClick={(ev)=>{ev.stopPropagation();handleDelete(e.id);}}>Delete</button>
               </div>

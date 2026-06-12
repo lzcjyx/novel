@@ -10,5 +10,6 @@ pub mod prompt_rendering;
 pub mod review_agents;
 pub mod review_arbiter;
 pub mod review_repair;
+pub mod task_transaction;
 pub mod weekly_planner;
 pub mod writing_context;

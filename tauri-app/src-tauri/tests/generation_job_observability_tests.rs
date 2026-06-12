@@ -292,6 +292,227 @@ fn stale_running_jobs_are_marked_failed_on_recovery() {
 }
 
 #[test]
+fn interrupted_generation_recovery_rolls_back_task_owned_rows() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    insert_plan(&db, &project_id, "plan-rollback");
+    let job_id = tauri_app_lib::db::generation_jobs::create_generation_job(
+        &db,
+        &project_id,
+        "plan-rollback",
+    )
+    .unwrap();
+
+    tauri_app_lib::workflow::task_transaction::begin_generation_task_snapshot(
+        &db,
+        &job_id,
+        &project_id,
+        "plan-rollback",
+    )
+    .unwrap();
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chapter_plans SET status = 'in_progress' WHERE id = 'plan-rollback'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, chapter_plan_id, sequence, title, status)
+             VALUES ('chapter-owned', ?1, 'plan-rollback', 1, 'Owned Draft', 'draft')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapter_versions (id, chapter_id, project_id, version_number, version_type, title)
+             VALUES ('version-owned', 'chapter-owned', ?1, 1, 'draft', 'Owned Draft')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::workflow::task_transaction::record_task_owned_row(
+        &db,
+        &job_id,
+        "chapters",
+        "chapter-owned",
+    )
+    .unwrap();
+    tauri_app_lib::workflow::task_transaction::record_task_owned_row(
+        &db,
+        &job_id,
+        "chapter_versions",
+        "version-owned",
+    )
+    .unwrap();
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
+
+    let recovered = tauri_app_lib::db::generation_jobs::recover_interrupted_generation_jobs(
+        &db,
+        0,
+        "Application quit before this generation job completed.",
+    )
+    .unwrap();
+
+    assert_eq!(recovered, 1);
+    let conn = db.conn.lock().unwrap();
+    let chapter_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chapters WHERE id = 'chapter-owned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let version_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chapter_versions WHERE id = 'version-owned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let plan_status: String = conn
+        .query_row(
+            "SELECT status FROM chapter_plans WHERE id = 'plan-rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let job_status: String = conn
+        .query_row(
+            "SELECT status FROM generation_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(chapter_count, 0);
+    assert_eq!(version_count, 0);
+    assert_eq!(plan_status, "planned");
+    assert_eq!(job_status, "failed");
+}
+
+#[test]
+fn reset_stuck_job_uses_recovery_and_restores_plan() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    insert_plan(&db, &project_id, "plan-reset-rollback");
+    let job_id = tauri_app_lib::db::generation_jobs::create_generation_job(
+        &db,
+        &project_id,
+        "plan-reset-rollback",
+    )
+    .unwrap();
+    tauri_app_lib::workflow::task_transaction::begin_generation_task_snapshot(
+        &db,
+        &job_id,
+        &project_id,
+        "plan-reset-rollback",
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE chapter_plans SET status = 'in_progress' WHERE id = 'plan-reset-rollback'",
+            [],
+        )
+        .unwrap();
+    }
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
+
+    tauri_app_lib::db::generation_jobs::recover_project_interrupted_jobs(
+        &db,
+        &project_id,
+        "operator reset stuck job",
+    )
+    .unwrap();
+
+    let conn = db.conn.lock().unwrap();
+    let plan_status: String = conn
+        .query_row(
+            "SELECT status FROM chapter_plans WHERE id = 'plan-reset-rollback'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let job_status: String = conn
+        .query_row(
+            "SELECT status FROM generation_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(plan_status, "planned");
+    assert_eq!(job_status, "failed");
+}
+
+#[test]
+fn interrupted_generation_recovery_restores_learning_usage_counters() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    insert_plan(&db, &project_id, "plan-learning-rollback");
+    let job_id = tauri_app_lib::db::generation_jobs::create_generation_job(
+        &db,
+        &project_id,
+        "plan-learning-rollback",
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO learning_entries
+             (id, project_id, source_type, category, pattern_name, pattern_description, usage_count, last_used_at)
+             VALUES ('learn-rollback', ?1, 'manual', 'style', 'before', 'before', 5, '2026-01-01 00:00:00')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+    tauri_app_lib::workflow::task_transaction::begin_generation_task_snapshot(
+        &db,
+        &job_id,
+        &project_id,
+        "plan-learning-rollback",
+    )
+    .unwrap();
+    tauri_app_lib::workflow::task_transaction::record_learning_entry_usage_snapshot(
+        &db,
+        &job_id,
+        &["learn-rollback".to_string()],
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE learning_entries
+             SET usage_count = 6, last_used_at = '2026-06-12 12:00:00'
+             WHERE id = 'learn-rollback'",
+            [],
+        )
+        .unwrap();
+    }
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
+
+    let recovered = tauri_app_lib::db::generation_jobs::recover_project_interrupted_jobs(
+        &db,
+        &project_id,
+        "operator reset stuck job",
+    )
+    .unwrap();
+
+    assert_eq!(recovered, 1);
+    let conn = db.conn.lock().unwrap();
+    let (usage_count, last_used_at): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT usage_count, last_used_at FROM learning_entries WHERE id = 'learn-rollback'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(usage_count, 5);
+    assert_eq!(last_used_at.as_deref(), Some("2026-01-01 00:00:00"));
+}
+
+#[test]
 fn fresh_running_jobs_are_not_recovered_as_stale() {
     let db = setup_db();
     let project_id = insert_project(&db);

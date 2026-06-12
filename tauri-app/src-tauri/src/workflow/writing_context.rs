@@ -30,6 +30,7 @@ pub struct WritingContextPackage {
     pub retrieval_trace: RetrievalTrace,
     pub style: serde_json::Value,
     pub learned_patterns: Vec<LearningEntry>,
+    pub learning_entry_context_ids: Vec<String>,
     pub operator_controls: OperatorControls,
 }
 
@@ -348,6 +349,10 @@ pub fn build_writing_context(
         crate::db::bible::get_character_states(db, &project.id).unwrap_or_default();
     let learned_patterns =
         crate::workflow::learning::get_top_learning_entries(db, &project.id, 8).unwrap_or_default();
+    let learning_entry_context_ids = learned_patterns
+        .iter()
+        .map(|entry| format!("learning_entry:{}", entry.id))
+        .collect::<Vec<_>>();
 
     let graph_context = build_graph_context(db, &project.id, plan).unwrap_or_default();
     let retrieval = rerank_retrieval_with_graph_context(retrieval, &graph_context);
@@ -399,6 +404,7 @@ pub fn build_writing_context(
             "style_guides": &canon.style_guides,
         }),
         learned_patterns,
+        learning_entry_context_ids,
         operator_controls: controls.unwrap_or_default(),
     })
 }

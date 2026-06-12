@@ -403,6 +403,7 @@ struct CapturingProvider {
     users: Arc<Mutex<Vec<String>>>,
     embed_calls: Arc<Mutex<usize>>,
     canon_graph_edges: bool,
+    canon_task_rows: bool,
     review_text: Option<String>,
     usage: Option<ModelUsageReport>,
 }
@@ -429,6 +430,33 @@ impl ModelClient for CapturingProvider {
         }
 
         if system.contains("canon_extractor") {
+            if self.canon_task_rows {
+                return Ok(json!({
+                    "chapter_summary": "最终修订稿进入圣经",
+                    "character_state_updates": [{
+                        "character_id": "char-pipe",
+                        "physical_state": "雨水浸透外套",
+                        "emotional_state": "警觉"
+                    }],
+                    "timeline_events": [{
+                        "event_time_label": "雨夜",
+                        "sequence": 1,
+                        "event_summary": "主角发现墙面旧名",
+                        "involved_characters": ["主角"],
+                        "involved_locations": [],
+                        "consequences": ["旧名线索启动"],
+                        "confidence": 0.9
+                    }],
+                    "new_lore": [],
+                    "foreshadowing_updates": [{
+                        "action": "introduced",
+                        "clue_text": "潮湿墙面上的旧名"
+                    }],
+                    "vector_documents": [],
+                    "knowledge_graph_edges": [],
+                    "human_review_required": []
+                }));
+            }
             if self.canon_graph_edges {
                 return Ok(json!({
                     "chapter_summary": "最终修订稿进入圣经",
@@ -502,6 +530,37 @@ impl ModelClient for CapturingProvider {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         *self.embed_calls.lock().unwrap() += 1;
         Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+    }
+}
+
+fn ids_for(db: &Database, sql: &str, value: &str) -> Vec<String> {
+    let conn = db.conn.lock().unwrap();
+    let mut stmt = conn.prepare(sql).unwrap();
+    stmt.query_map(rusqlite::params![value], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn assert_owned_rows_include(owned_rows: &Value, table: &str, row_ids: &[String]) {
+    let owned = owned_rows[table]
+        .as_array()
+        .unwrap_or_else(|| panic!("owned_rows.{} should be an array", table))
+        .iter()
+        .filter_map(|id| id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !row_ids.is_empty(),
+        "test setup should create at least one {} row",
+        table
+    );
+    for row_id in row_ids {
+        assert!(
+            owned.iter().any(|owned_id| owned_id == row_id),
+            "owned_rows.{} should include {}",
+            table,
+            row_id
+        );
     }
 }
 
@@ -671,6 +730,17 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
         rusqlite::params![project_id],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO characters (id, project_id, name, role)
+         VALUES ('char-pipe', ?1, '主角', 'protagonist')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE projects SET auto_publish = 1, blog_provider = 'local' WHERE id = ?1",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
     drop(conn);
     tauri_app_lib::db::vector_store::insert_vector_document(
         &db,
@@ -690,6 +760,7 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     tauri_app_lib::db::settings::save_settings(&db, &settings).unwrap();
 
     let provider = CapturingProvider {
+        canon_task_rows: true,
         usage: Some(ModelUsageReport {
             prompt_tokens: Some(1111),
             completion_tokens: Some(222),
@@ -718,16 +789,16 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     let systems = provider.systems.lock().unwrap().join("\n---\n");
     assert!(!systems.contains("WRITING_CONTEXT_JSON"));
     assert!(systems.contains("克制悬疑"));
+    assert!(systems.contains("learning_entry:learn-pipe"));
     assert!(systems.contains("门后旧名"));
     assert!(systems.contains("旧名伏笔"));
     assert!(!systems.contains("{{"));
 
-    let latest_version = {
-        let chapters = tauri_app_lib::db::chapters::get_chapters(&db, &project_id).unwrap();
-        tauri_app_lib::db::chapters::get_latest_version(&db, &chapters[0].id)
-            .unwrap()
-            .unwrap()
-    };
+    let chapters = tauri_app_lib::db::chapters::get_chapters(&db, &project_id).unwrap();
+    let chapter_id = chapters[0].id.clone();
+    let latest_version = tauri_app_lib::db::chapters::get_latest_version(&db, &chapter_id)
+        .unwrap()
+        .unwrap();
     let version_metadata: serde_json::Value = serde_json::from_str(&latest_version.metadata)
         .expect("chapter version metadata should be json");
     assert!(version_metadata["selected_retrieval_source_keys"]
@@ -738,6 +809,21 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     assert_eq!(
         version_metadata["retrieval_trace"]["sources"][0]["source_id"].as_str(),
         Some("ctx-chapter-1")
+    );
+    assert_eq!(
+        version_metadata["selected_learning_entry_ids"],
+        serde_json::json!(["learn-pipe"])
+    );
+    assert_eq!(
+        version_metadata["selected_learning_entries"][0]["pattern_name"].as_str(),
+        Some("克制悬疑")
+    );
+    assert!(
+        version_metadata["learning_context_hash"]
+            .as_str()
+            .unwrap_or("")
+            .len()
+            >= 16
     );
 
     let plans = tauri_app_lib::db::chapters::get_chapter_plans(&db, &project_id).unwrap();
@@ -755,6 +841,69 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
 
     let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
     let job_metadata: serde_json::Value = serde_json::from_str(&jobs[0].metadata).unwrap();
+    assert_eq!(
+        job_metadata["task_snapshot"]["chapter_plan_id"].as_str(),
+        Some("plan-pipe")
+    );
+    assert!(job_metadata["task_snapshot"]["owned_rows"]["chapters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id.as_str() == Some(chapter_id.as_str())));
+    assert!(
+        job_metadata["task_snapshot"]["owned_rows"]["chapter_versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id.as_str() == Some(latest_version.id.as_str()))
+    );
+    let owned_rows = &job_metadata["task_snapshot"]["owned_rows"];
+    let review_ids = ids_for(
+        &db,
+        "SELECT id FROM agent_reviews WHERE chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let score_ids = ids_for(
+        &db,
+        "SELECT id FROM review_scores WHERE chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let blog_ids = ids_for(
+        &db,
+        "SELECT id FROM blog_posts WHERE chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let character_state_ids = ids_for(
+        &db,
+        "SELECT id FROM character_states WHERE after_chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let timeline_event_ids = ids_for(
+        &db,
+        "SELECT id FROM timeline_events WHERE chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let foreshadowing_ids = ids_for(
+        &db,
+        "SELECT id FROM foreshadowing WHERE introduced_chapter_id = ?1 ORDER BY id",
+        &chapter_id,
+    );
+    let graph_edge_ids = ids_for(
+        &db,
+        "SELECT id FROM knowledge_graph_edges WHERE project_id = ?1 ORDER BY id",
+        &project_id,
+    );
+    assert_owned_rows_include(owned_rows, "agent_reviews", &review_ids);
+    assert_owned_rows_include(owned_rows, "review_scores", &score_ids);
+    assert_owned_rows_include(owned_rows, "blog_posts", &blog_ids);
+    assert_owned_rows_include(owned_rows, "character_states", &character_state_ids);
+    assert_owned_rows_include(owned_rows, "timeline_events", &timeline_event_ids);
+    assert_owned_rows_include(owned_rows, "foreshadowing", &foreshadowing_ids);
+    assert_owned_rows_include(owned_rows, "knowledge_graph_edges", &graph_edge_ids);
+    assert_eq!(
+        job_metadata["learning_context"]["selected_learning_entry_ids"],
+        serde_json::json!(["learn-pipe"])
+    );
     let usage_events = job_metadata["model_usage_events"].as_array().unwrap();
     let draft_usage = usage_events
         .iter()

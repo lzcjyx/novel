@@ -298,6 +298,34 @@ pub fn record_job_phase_event(
     Ok(())
 }
 
+pub fn record_job_learning_context(
+    db: &Database,
+    job_id: &str,
+    selected_learning_entry_ids: &[String],
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let metadata_raw: String = conn
+        .query_row(
+            "SELECT metadata FROM generation_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Load job metadata: {}", e))?;
+    let mut metadata = normalize_metadata(&metadata_raw);
+    metadata["learning_context"] = json!({
+        "selected_learning_entry_ids": selected_learning_entry_ids,
+        "updated_at": now_timestamp(),
+    });
+    let metadata_json =
+        serde_json::to_string(&metadata).map_err(|e| format!("Serialize job metadata: {}", e))?;
+    conn.execute(
+        "UPDATE generation_jobs SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![metadata_json, job_id],
+    )
+    .map_err(|e| format!("Record job learning context: {}", e))?;
+    Ok(())
+}
+
 pub fn estimate_tokens(text: &str) -> i32 {
     let chars = text.chars().count();
     if chars == 0 {
@@ -487,6 +515,14 @@ pub fn recover_stale_running_jobs(
     timeout_secs: i64,
     reason: &str,
 ) -> Result<usize, String> {
+    recover_interrupted_generation_jobs(db, timeout_secs, reason)
+}
+
+pub fn recover_interrupted_generation_jobs(
+    db: &Database,
+    timeout_secs: i64,
+    reason: &str,
+) -> Result<usize, String> {
     let cutoff_modifier = format!("-{} seconds", timeout_secs.max(0));
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let mut stmt = conn
@@ -505,9 +541,44 @@ pub fn recover_stale_running_jobs(
     drop(stmt);
     drop(conn);
 
+    let mut recovered = 0;
     for job_id in &job_ids {
-        update_job_status(db, job_id, "failed", Some(reason))?;
+        if crate::workflow::task_transaction::rollback_generation_task(db, job_id, reason)? {
+            recovered += 1;
+        }
     }
 
-    Ok(job_ids.len())
+    Ok(recovered)
+}
+
+pub fn recover_project_interrupted_jobs(
+    db: &Database,
+    project_id: &str,
+    reason: &str,
+) -> Result<usize, String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM generation_jobs
+             WHERE project_id = ?1
+               AND status IN ('started','draft_created','reviewing','revising','publishing')
+             ORDER BY updated_at ASC",
+        )
+        .map_err(|e| format!("Prepare project interrupted job recovery: {}", e))?;
+    let job_ids = stmt
+        .query_map(params![project_id], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Query project interrupted jobs: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect project interrupted jobs: {}", e))?;
+    drop(stmt);
+    drop(conn);
+
+    let mut recovered = 0;
+    for job_id in &job_ids {
+        if crate::workflow::task_transaction::rollback_generation_task(db, job_id, reason)? {
+            recovered += 1;
+        }
+    }
+
+    Ok(recovered)
 }

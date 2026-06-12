@@ -70,6 +70,11 @@
 ## 输入 writing_context JSON
 {{WRITING_CONTEXT_JSON}}
 
+## Knowledge Library 使用要求
+- 如果 writing_context.learned_patterns 非空，必须优先吸收其中与本章相关的技巧。
+- 不要机械复述 pattern_name；要把技巧落实到场景、动作、对话、节奏和叙事选择里。
+- 对实际使用的条目，在 used_context_ids 中写入 `learning_entry:<id>`。
+
 ## 输出 JSON schema
 {
   "title": "string（≤10 字的章节标题）",

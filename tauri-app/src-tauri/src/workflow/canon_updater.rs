@@ -35,6 +35,7 @@ pub async fn update_canon_after_chapter(
     project_id: &str,
     chapter_id: &str,
     chapter_draft: &serde_json::Value,
+    generation_job_id: Option<&str>,
 ) -> Result<(), String> {
     let chapter = chapters::get_chapter(db, chapter_id)?;
     let canon_template = prompts::load_prompt("canon_extractor")?;
@@ -91,8 +92,10 @@ pub async fn update_canon_after_chapter(
         .await
     {
         Ok(extracted) => {
+            let mut inserted_character_states = Vec::new();
             let mut inserted_timeline_events = Vec::new();
             let mut foreshadowing_graph_updates = Vec::new();
+            let mut inserted_foreshadowing = Vec::new();
             let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
 
             // Update chapter summary
@@ -108,7 +111,7 @@ pub async fn update_canon_after_chapter(
                 for state in arr {
                     let id = Database::new_uuid();
                     let char_id = state["character_id"].as_str().unwrap_or("");
-                    let _ = conn.execute(
+                    let changed = conn.execute(
                         "INSERT INTO character_states (id, project_id, character_id, after_chapter_id, physical_state, emotional_state)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         rusqlite::params![
@@ -117,6 +120,9 @@ pub async fn update_canon_after_chapter(
                             state.get("emotional_state").and_then(|v| v.as_str()),
                         ],
                     );
+                    if matches!(changed, Ok(count) if count > 0) {
+                        inserted_character_states.push(id);
+                    }
                 }
             }
 
@@ -124,7 +130,7 @@ pub async fn update_canon_after_chapter(
             if let Some(arr) = extracted["timeline_events"].as_array() {
                 for event in arr {
                     let id = Database::new_uuid();
-                    let _ = conn.execute(
+                    let changed = conn.execute(
                         "INSERT INTO timeline_events (id, project_id, chapter_id, event_time_label, sequence, event_summary, involved_characters, involved_locations, consequences)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         rusqlite::params![
@@ -137,10 +143,12 @@ pub async fn update_canon_after_chapter(
                             json_array_text(event.get("consequences")),
                         ],
                     );
-                    inserted_timeline_events.push(InsertedTimelineEvent {
-                        id,
-                        event: event.clone(),
-                    });
+                    if matches!(changed, Ok(count) if count > 0) {
+                        inserted_timeline_events.push(InsertedTimelineEvent {
+                            id,
+                            event: event.clone(),
+                        });
+                    }
                 }
             }
 
@@ -155,7 +163,7 @@ pub async fn update_canon_after_chapter(
                     match action {
                         "introduced" => {
                             let id = Database::new_uuid();
-                            let _ = conn.execute(
+                            let changed = conn.execute(
                                 "INSERT INTO foreshadowing (id, project_id, clue_text, introduced_chapter_id, status)
                                  VALUES (?1, ?2, ?3, ?4, 'open')",
                                 rusqlite::params![
@@ -164,14 +172,17 @@ pub async fn update_canon_after_chapter(
                                     chapter_id,
                                 ],
                             );
-                            foreshadowing_graph_updates.push(ForeshadowingGraphUpdate {
-                                id,
-                                edge_type: "introduces".to_string(),
-                                clue_text: f
-                                    .get("clue_text")
-                                    .and_then(|value| value.as_str())
-                                    .map(|value| value.to_string()),
-                            });
+                            if matches!(changed, Ok(count) if count > 0) {
+                                inserted_foreshadowing.push(id.clone());
+                                foreshadowing_graph_updates.push(ForeshadowingGraphUpdate {
+                                    id,
+                                    edge_type: "introduces".to_string(),
+                                    clue_text: f
+                                        .get("clue_text")
+                                        .and_then(|value| value.as_str())
+                                        .map(|value| value.to_string()),
+                                });
+                            }
                         }
                         "resolved" => {
                             if let Some(f_id) = f
@@ -199,13 +210,36 @@ pub async fn update_canon_after_chapter(
             }
 
             drop(conn);
+            record_task_rows(
+                db,
+                generation_job_id,
+                "character_states",
+                &inserted_character_states,
+            )?;
+            record_task_rows(
+                db,
+                generation_job_id,
+                "timeline_events",
+                inserted_timeline_events
+                    .iter()
+                    .map(|event| event.id.as_str())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )?;
+            record_task_rows(
+                db,
+                generation_job_id,
+                "foreshadowing",
+                &inserted_foreshadowing,
+            )?;
             persist_deterministic_timeline_graph_edges(
                 db,
                 project_id,
                 &inserted_timeline_events,
                 &foreshadowing_graph_updates,
+                generation_job_id,
             )?;
-            persist_ai_inferred_graph_edges(db, project_id, &extracted)?;
+            persist_ai_inferred_graph_edges(db, project_id, &extracted, generation_job_id)?;
         }
         Err(e) => {
             // Canon extraction is non-blocking
@@ -213,6 +247,26 @@ pub async fn update_canon_after_chapter(
         }
     }
 
+    Ok(())
+}
+
+fn record_task_rows<S: AsRef<str>>(
+    db: &Database,
+    generation_job_id: Option<&str>,
+    table: &str,
+    row_ids: &[S],
+) -> Result<(), String> {
+    let Some(job_id) = generation_job_id else {
+        return Ok(());
+    };
+    for row_id in row_ids {
+        crate::workflow::task_transaction::record_task_owned_row(
+            db,
+            job_id,
+            table,
+            row_id.as_ref(),
+        )?;
+    }
     Ok(())
 }
 
@@ -256,6 +310,7 @@ fn persist_deterministic_timeline_graph_edges(
     project_id: &str,
     timeline_events: &[InsertedTimelineEvent],
     foreshadowing_updates: &[ForeshadowingGraphUpdate],
+    generation_job_id: Option<&str>,
 ) -> Result<(), String> {
     if timeline_events.is_empty() {
         return Ok(());
@@ -293,6 +348,7 @@ fn persist_deterministic_timeline_graph_edges(
                     "participates_in",
                     Some(description.as_str()),
                     confidence,
+                    generation_job_id,
                 ) {
                     log::warn!("Skipping deterministic timeline character edge: {}", err);
                 }
@@ -312,6 +368,7 @@ fn persist_deterministic_timeline_graph_edges(
                     "occurs_at",
                     Some(description.as_str()),
                     confidence,
+                    generation_job_id,
                 ) {
                     log::warn!("Skipping deterministic timeline location edge: {}", err);
                 }
@@ -336,6 +393,7 @@ fn persist_deterministic_timeline_graph_edges(
                     &update.edge_type,
                     Some(description.as_str()),
                     confidence,
+                    generation_job_id,
                 ) {
                     log::warn!(
                         "Skipping deterministic timeline foreshadowing edge: {}",
@@ -360,6 +418,7 @@ fn persist_ai_inferred_graph_edges(
     db: &Database,
     project_id: &str,
     extracted: &serde_json::Value,
+    generation_job_id: Option<&str>,
 ) -> Result<(), String> {
     let Some(edges) = extracted
         .get("knowledge_graph_edges")
@@ -426,6 +485,7 @@ fn persist_ai_inferred_graph_edges(
             edge_type,
             description,
             confidence,
+            generation_job_id,
         ) {
             log::warn!("Skipping inferred knowledge graph edge: {}", err);
         }
@@ -489,8 +549,12 @@ fn insert_graph_edge(
     edge_type: &str,
     description: Option<&str>,
     confidence: f64,
+    generation_job_id: Option<&str>,
 ) -> Result<String, String> {
-    crate::db::knowledge_graph::insert_edge(
+    let metadata = generation_job_id
+        .map(|job_id| serde_json::json!({ "generation_job_id": job_id }))
+        .unwrap_or_else(|| serde_json::json!({}));
+    let edge_id = crate::db::knowledge_graph::insert_edge_with_metadata(
         db,
         project_id,
         &source.id,
@@ -501,7 +565,17 @@ fn insert_graph_edge(
         description,
         true,
         confidence,
-    )
+        &metadata,
+    )?;
+    if let Some(job_id) = generation_job_id {
+        crate::workflow::task_transaction::record_task_owned_row(
+            db,
+            job_id,
+            "knowledge_graph_edges",
+            &edge_id,
+        )?;
+    }
+    Ok(edge_id)
 }
 
 fn graph_node_key(node_type: &str, id: &str) -> String {

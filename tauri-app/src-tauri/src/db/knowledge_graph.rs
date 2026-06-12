@@ -353,6 +353,34 @@ pub fn insert_edge(
     auto_inferred: bool,
     confidence: f64,
 ) -> Result<String, String> {
+    insert_edge_with_metadata(
+        db,
+        project_id,
+        source_id,
+        source_type,
+        target_id,
+        target_type,
+        edge_type,
+        description,
+        auto_inferred,
+        confidence,
+        &serde_json::json!({}),
+    )
+}
+
+pub fn insert_edge_with_metadata(
+    db: &Database,
+    project_id: &str,
+    source_id: &str,
+    source_type: &str,
+    target_id: &str,
+    target_type: &str,
+    edge_type: &str,
+    description: Option<&str>,
+    auto_inferred: bool,
+    confidence: f64,
+    metadata: &serde_json::Value,
+) -> Result<String, String> {
     validate_edge(
         project_id,
         source_id,
@@ -366,6 +394,8 @@ pub fn insert_edge(
     } else {
         0.0
     };
+    let metadata_json =
+        serde_json::to_string(metadata).map_err(|e| format!("Serialize edge metadata: {}", e))?;
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let existing_id: Option<String> = conn
         .query_row(
@@ -398,9 +428,21 @@ pub fn insert_edge(
 
     let id = Database::new_uuid();
     conn.execute(
-        "INSERT OR IGNORE INTO knowledge_graph_edges (id, project_id, source_node_id, source_node_type, target_node_id, target_node_type, edge_type, description, auto_inferred, confidence)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![id, project_id, source_id, source_type, target_id, target_type, edge_type, description, auto_inferred as i32, normalized_confidence],
+        "INSERT OR IGNORE INTO knowledge_graph_edges (id, project_id, source_node_id, source_node_type, target_node_id, target_node_type, edge_type, description, auto_inferred, confidence, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            id,
+            project_id,
+            source_id,
+            source_type,
+            target_id,
+            target_type,
+            edge_type,
+            description,
+            auto_inferred as i32,
+            normalized_confidence,
+            metadata_json
+        ],
     ).map_err(|e| format!("Insert edge: {}", e))?;
     Ok(id)
 }

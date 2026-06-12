@@ -365,6 +365,7 @@ async fn canon_update_persists_valid_ai_inferred_graph_edges() {
             "summary": "发现旧车站线索。",
             "major_events": []
         }),
+        None,
     )
     .await
     .unwrap();
@@ -404,6 +405,7 @@ async fn canon_update_resolves_graph_edges_from_unique_node_labels() {
             "summary": "发现旧车站线索。",
             "major_events": []
         }),
+        None,
     )
     .await
     .unwrap();
@@ -442,6 +444,7 @@ async fn canon_update_creates_deterministic_edges_from_timeline_events() {
             "summary": "发现怀表线索。",
             "major_events": []
         }),
+        None,
     )
     .await
     .unwrap();
