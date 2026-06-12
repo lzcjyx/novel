@@ -1,4 +1,5 @@
 use crate::ai::client::{ModelClient, ModelUsageReport};
+use crate::ai::preview_chars;
 use crate::ai::types::*;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -75,7 +76,7 @@ impl DeepSeekProvider {
                     format!(
                         "Parse response: {} — body: {}",
                         e,
-                        &text[..text.len().min(500)]
+                        preview_chars(&text, 500)
                     )
                 })?;
                 let usage = parsed.usage.map(|usage| ModelUsageReport {
@@ -102,7 +103,7 @@ impl DeepSeekProvider {
             return Err(format!(
                 "API error {}: {}",
                 status,
-                &text[..text.len().min(300)]
+                preview_chars(&text, 300)
             ));
         }
         Err("Max retries exceeded".into())
@@ -132,7 +133,7 @@ impl DeepSeekProvider {
             format!(
                 "JSON parse error: {} — first 400 chars: {}",
                 e,
-                &cleaned[..cleaned.len().min(400)]
+                preview_chars(&cleaned, 400)
             )
         })
     }

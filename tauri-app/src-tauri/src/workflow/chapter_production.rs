@@ -293,9 +293,11 @@ pub async fn generate_next_chapter(
     let retrieval_query = writing_context::build_retrieval_query(&plan, operator_controls.as_ref());
     log(log_tx, "Retrieving vector context...");
 
-    let embed_client = emb_provider.unwrap_or(provider);
     let mut retrieval_documents = Vec::new();
-    if !retrieval_query.trim().is_empty() {
+    let retrieval_detail: String;
+    if retrieval_query.trim().is_empty() {
+        retrieval_detail = "empty retrieval query; using structured context".to_string();
+    } else if let Some(embed_client) = emb_provider {
         match embed_client.embed(&[retrieval_query]).await {
             Ok(embeddings) if !embeddings.is_empty() => {
                 match crate::db::vector_store::search_similar_documents(
@@ -306,20 +308,27 @@ pub async fn generate_next_chapter(
                 ) {
                     Ok(docs) => {
                         log(log_tx, &format!("Found {} relevant documents", docs.len()));
+                        retrieval_detail = format!("{} docs", docs.len());
                         retrieval_documents = docs;
                     }
                     Err(e) => {
+                        retrieval_detail = format!("vector search skipped: {}", e);
                         log(log_tx, &format!("Vector search fallback: {}", e));
                     }
                 }
             }
             _ => {
+                retrieval_detail =
+                    "embedding failed or empty; using structured context".to_string();
                 log(
                     log_tx,
                     "Embedding failed or empty, continuing without vector context",
                 );
             }
         }
+    } else {
+        retrieval_detail = "RAG disabled; using structured context".to_string();
+        log(log_tx, "RAG disabled; using structured context");
     }
     emit_job_event(
         db,
@@ -327,7 +336,7 @@ pub async fn generate_next_chapter(
         event_tx,
         "retrieve_context",
         "done",
-        Some(&format!("{} docs", retrieval_documents.len())),
+        Some(&retrieval_detail),
         18.0,
     );
     // 9. Build writing context package
@@ -944,21 +953,42 @@ pub async fn generate_next_chapter(
         Err(e) => {
             log(log_tx, &format!("Export failed: {}", e));
             emit_job_event(db, &job_id, event_tx, "export", "failed", Some(&e), 85.0);
-            None
+            let err = format!("Export failed: {}", e);
+            generation_jobs::update_job_status(db, &job_id, "failed", Some(&err))?;
+            return Err(err);
         }
     };
 
     // 17. Update canon
     log(log_tx, "Updating canon...");
-    canon_updater::update_canon_after_chapter(
+    match canon_updater::update_canon_after_chapter(
         db,
         provider,
         project_id,
         &chapter_id,
         &current_draft,
     )
-    .await?;
-    emit_job_event(db, &job_id, event_tx, "update_canon", "done", None, 92.0);
+    .await
+    {
+        Ok(()) => {
+            emit_job_event(db, &job_id, event_tx, "update_canon", "done", None, 92.0);
+        }
+        Err(e) => {
+            log(
+                log_tx,
+                &format!("Canon update skipped after chapter save: {}", e),
+            );
+            emit_job_event(
+                db,
+                &job_id,
+                event_tx,
+                "update_canon",
+                "failed_noncritical",
+                Some(&e),
+                92.0,
+            );
+        }
+    }
 
     let reflection_scores = serde_json::json!({
         "average_score": current_aggregation.average_score,

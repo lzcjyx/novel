@@ -1,0 +1,70 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Dependency directories
+**/node_modules/
+
+# Build output
+**/dist/
+**/dist-ssr/
+**/target/
+**/.vite/
+tauri-app/src-tauri/gen/schemas/
+
+# Logs and runtime output
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local app data and databases
+AI-Novels/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+
+# Browser and test artifacts
+playwright-report/
+test-results/
+coverage/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+edge-smoke.png
+
+# Local tools, installers, and worktrees
+*.msi
+.worktrees/
+worktrees/
+
+# Local legacy services and experiments outside the tracked desktop app
+writer-service/
+orchestrator/
+autoresearch/
+DESIGN.md
+
+# OS and editor state
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

@@ -3,7 +3,31 @@ use crate::db::connection::Database;
 use crate::db::{bible, chapters};
 use crate::prompts;
 use crate::workflow::prompt_rendering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+struct InsertedTimelineEvent {
+    id: String,
+    event: serde_json::Value,
+}
+
+#[derive(Debug, Clone)]
+struct ForeshadowingGraphUpdate {
+    id: String,
+    edge_type: String,
+    clue_text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GraphNodeRef {
+    id: String,
+    node_type: String,
+}
+
+struct GraphNodeIndex {
+    by_id: HashMap<String, GraphNodeRef>,
+    by_label: HashMap<String, Option<GraphNodeRef>>,
+}
 
 pub async fn update_canon_after_chapter(
     db: &Database,
@@ -67,6 +91,8 @@ pub async fn update_canon_after_chapter(
         .await
     {
         Ok(extracted) => {
+            let mut inserted_timeline_events = Vec::new();
+            let mut foreshadowing_graph_updates = Vec::new();
             let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
 
             // Update chapter summary
@@ -99,21 +125,33 @@ pub async fn update_canon_after_chapter(
                 for event in arr {
                     let id = Database::new_uuid();
                     let _ = conn.execute(
-                        "INSERT INTO timeline_events (id, project_id, chapter_id, sequence, event_summary)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        "INSERT INTO timeline_events (id, project_id, chapter_id, event_time_label, sequence, event_summary, involved_characters, involved_locations, consequences)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         rusqlite::params![
                             id, project_id, chapter_id,
-                            event.get("sequence").and_then(|v| v.as_i64()),
+                            event.get("event_time_label").and_then(|v| v.as_str()),
+                            event_sequence(event),
                             event.get("event_summary").and_then(|v| v.as_str()),
+                            json_array_text(event.get("involved_characters")),
+                            json_array_text(event.get("involved_locations")),
+                            json_array_text(event.get("consequences")),
                         ],
                     );
+                    inserted_timeline_events.push(InsertedTimelineEvent {
+                        id,
+                        event: event.clone(),
+                    });
                 }
             }
 
             // Update foreshadowing
             if let Some(arr) = extracted["foreshadowing_updates"].as_array() {
                 for f in arr {
-                    let action = f.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                    let action = f
+                        .get("action")
+                        .or_else(|| f.get("type"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     match action {
                         "introduced" => {
                             let id = Database::new_uuid();
@@ -126,13 +164,33 @@ pub async fn update_canon_after_chapter(
                                     chapter_id,
                                 ],
                             );
+                            foreshadowing_graph_updates.push(ForeshadowingGraphUpdate {
+                                id,
+                                edge_type: "introduces".to_string(),
+                                clue_text: f
+                                    .get("clue_text")
+                                    .and_then(|value| value.as_str())
+                                    .map(|value| value.to_string()),
+                            });
                         }
                         "resolved" => {
-                            if let Some(f_id) = f.get("foreshadowing_id").and_then(|v| v.as_str()) {
+                            if let Some(f_id) = f
+                                .get("foreshadowing_id")
+                                .or_else(|| f.get("related_existing_id"))
+                                .and_then(|v| v.as_str())
+                            {
                                 let _ = conn.execute(
                                     "UPDATE foreshadowing SET resolved_chapter_id = ?1, status = 'resolved', updated_at = datetime('now') WHERE id = ?2",
                                     rusqlite::params![chapter_id, f_id],
                                 );
+                                foreshadowing_graph_updates.push(ForeshadowingGraphUpdate {
+                                    id: f_id.to_string(),
+                                    edge_type: "resolves".to_string(),
+                                    clue_text: f
+                                        .get("clue_text")
+                                        .and_then(|value| value.as_str())
+                                        .map(|value| value.to_string()),
+                                });
                             }
                         }
                         _ => {}
@@ -141,6 +199,12 @@ pub async fn update_canon_after_chapter(
             }
 
             drop(conn);
+            persist_deterministic_timeline_graph_edges(
+                db,
+                project_id,
+                &inserted_timeline_events,
+                &foreshadowing_graph_updates,
+            )?;
             persist_ai_inferred_graph_edges(db, project_id, &extracted)?;
         }
         Err(e) => {
@@ -150,6 +214,146 @@ pub async fn update_canon_after_chapter(
     }
 
     Ok(())
+}
+
+fn event_sequence(event: &serde_json::Value) -> Option<i64> {
+    event
+        .get("sequence")
+        .or_else(|| event.get("sequence_hint"))
+        .and_then(|value| value.as_i64())
+}
+
+fn json_array_text(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(value @ serde_json::Value::Array(_)) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string())
+        }
+        Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+            serde_json::to_string(&vec![text.trim()]).unwrap_or_else(|_| "[]".to_string())
+        }
+        _ => "[]".to_string(),
+    }
+}
+
+fn string_values(value: Option<&serde_json::Value>) -> Vec<String> {
+    match value {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+            vec![text.trim().to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn persist_deterministic_timeline_graph_edges(
+    db: &Database,
+    project_id: &str,
+    timeline_events: &[InsertedTimelineEvent],
+    foreshadowing_updates: &[ForeshadowingGraphUpdate],
+) -> Result<(), String> {
+    if timeline_events.is_empty() {
+        return Ok(());
+    }
+
+    let snapshot = crate::db::knowledge_graph::get_snapshot(db, project_id)?;
+    let node_index = GraphNodeIndex::from_snapshot(&snapshot);
+
+    for timeline_event in timeline_events {
+        let timeline_ref = GraphNodeRef {
+            id: timeline_event.id.clone(),
+            node_type: "timeline_event".to_string(),
+        };
+        let event_summary = timeline_event
+            .event
+            .get("event_summary")
+            .and_then(|value| value.as_str())
+            .unwrap_or("timeline event");
+        let confidence = timeline_event
+            .event
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.85);
+
+        for character in string_values(timeline_event.event.get("involved_characters")) {
+            if let Some(character_ref) =
+                resolve_node_ref(&node_index, "character", None, Some(&character))
+            {
+                let description = format!("参与事件：{}", event_summary);
+                if let Err(err) = insert_graph_edge(
+                    db,
+                    project_id,
+                    &character_ref,
+                    &timeline_ref,
+                    "participates_in",
+                    Some(description.as_str()),
+                    confidence,
+                ) {
+                    log::warn!("Skipping deterministic timeline character edge: {}", err);
+                }
+            }
+        }
+
+        for location in string_values(timeline_event.event.get("involved_locations")) {
+            if let Some(location_ref) =
+                resolve_node_ref(&node_index, "location", None, Some(&location))
+            {
+                let description = format!("事件发生地：{}", event_summary);
+                if let Err(err) = insert_graph_edge(
+                    db,
+                    project_id,
+                    &timeline_ref,
+                    &location_ref,
+                    "occurs_at",
+                    Some(description.as_str()),
+                    confidence,
+                ) {
+                    log::warn!("Skipping deterministic timeline location edge: {}", err);
+                }
+            }
+        }
+
+        for update in foreshadowing_updates {
+            if let Some(foreshadowing_ref) =
+                resolve_node_ref(&node_index, "foreshadowing", Some(&update.id), None)
+            {
+                let description = match update.clue_text.as_deref() {
+                    Some(text) if !text.trim().is_empty() => {
+                        format!("事件{}伏笔：{}", edge_action_label(&update.edge_type), text)
+                    }
+                    _ => format!("事件{}伏笔", edge_action_label(&update.edge_type)),
+                };
+                if let Err(err) = insert_graph_edge(
+                    db,
+                    project_id,
+                    &timeline_ref,
+                    &foreshadowing_ref,
+                    &update.edge_type,
+                    Some(description.as_str()),
+                    confidence,
+                ) {
+                    log::warn!(
+                        "Skipping deterministic timeline foreshadowing edge: {}",
+                        err
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn edge_action_label(edge_type: &str) -> &'static str {
+    match edge_type {
+        "resolves" => "回收",
+        _ => "引入",
+    }
 }
 
 fn persist_ai_inferred_graph_edges(
@@ -168,25 +372,11 @@ fn persist_ai_inferred_graph_edges(
     }
 
     let snapshot = crate::db::knowledge_graph::get_snapshot(db, project_id)?;
-    let valid_nodes = snapshot
-        .nodes
-        .iter()
-        .map(|node| format!("{}:{}", node.node_type, node.id))
-        .collect::<HashSet<_>>();
+    let node_index = GraphNodeIndex::from_snapshot(&snapshot);
 
     for edge in edges {
-        let source_id = edge
-            .get("source_node_id")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .trim();
         let source_type = edge
             .get("source_node_type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("")
-            .trim();
-        let target_id = edge
-            .get("target_node_id")
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .trim();
@@ -200,27 +390,41 @@ fn persist_ai_inferred_graph_edges(
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .trim();
-        if !valid_nodes.contains(&format!("{}:{}", source_type, source_id))
-            || !valid_nodes.contains(&format!("{}:{}", target_type, target_id))
-        {
+        let Some(source_node) = resolve_node_ref(
+            &node_index,
+            source_type,
+            edge.get("source_node_id").and_then(|value| value.as_str()),
+            edge.get("source_label")
+                .or_else(|| edge.get("source_name"))
+                .and_then(|value| value.as_str()),
+        ) else {
+            log::warn!("Skipping inferred graph edge with unknown source node");
             continue;
-        }
+        };
+        let Some(target_node) = resolve_node_ref(
+            &node_index,
+            target_type,
+            edge.get("target_node_id").and_then(|value| value.as_str()),
+            edge.get("target_label")
+                .or_else(|| edge.get("target_name"))
+                .and_then(|value| value.as_str()),
+        ) else {
+            log::warn!("Skipping inferred graph edge with unknown target node");
+            continue;
+        };
 
         let confidence = edge
             .get("confidence")
             .and_then(|value| value.as_f64())
             .unwrap_or(0.7);
         let description = edge.get("description").and_then(|value| value.as_str());
-        if let Err(err) = crate::db::knowledge_graph::insert_edge(
+        if let Err(err) = insert_graph_edge(
             db,
             project_id,
-            source_id,
-            source_type,
-            target_id,
-            target_type,
+            &source_node,
+            &target_node,
             edge_type,
             description,
-            true,
             confidence,
         ) {
             log::warn!("Skipping inferred knowledge graph edge: {}", err);
@@ -228,4 +432,86 @@ fn persist_ai_inferred_graph_edges(
     }
 
     Ok(())
+}
+
+impl GraphNodeIndex {
+    fn from_snapshot(snapshot: &crate::db::knowledge_graph::KnowledgeGraphSnapshot) -> Self {
+        let mut by_id = HashMap::new();
+        let mut by_label: HashMap<String, Option<GraphNodeRef>> = HashMap::new();
+
+        for node in &snapshot.nodes {
+            let node_ref = GraphNodeRef {
+                id: node.id.clone(),
+                node_type: node.node_type.clone(),
+            };
+            by_id.insert(graph_node_key(&node.node_type, &node.id), node_ref.clone());
+
+            if !node.label.trim().is_empty() {
+                let label_key = graph_label_key(&node.node_type, &node.label);
+                by_label
+                    .entry(label_key)
+                    .and_modify(|existing| *existing = None)
+                    .or_insert_with(|| Some(node_ref));
+            }
+        }
+
+        Self { by_id, by_label }
+    }
+}
+
+fn resolve_node_ref(
+    index: &GraphNodeIndex,
+    node_type: &str,
+    node_id: Option<&str>,
+    label: Option<&str>,
+) -> Option<GraphNodeRef> {
+    let node_type = node_type.trim();
+    if node_type.is_empty() {
+        return None;
+    }
+
+    if let Some(id) = node_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return index.by_id.get(&graph_node_key(node_type, id)).cloned();
+    }
+
+    let label = label.map(str::trim).filter(|value| !value.is_empty())?;
+    index
+        .by_label
+        .get(&graph_label_key(node_type, label))
+        .and_then(|node| node.clone())
+}
+
+fn insert_graph_edge(
+    db: &Database,
+    project_id: &str,
+    source: &GraphNodeRef,
+    target: &GraphNodeRef,
+    edge_type: &str,
+    description: Option<&str>,
+    confidence: f64,
+) -> Result<String, String> {
+    crate::db::knowledge_graph::insert_edge(
+        db,
+        project_id,
+        &source.id,
+        &source.node_type,
+        &target.id,
+        &target.node_type,
+        edge_type,
+        description,
+        true,
+        confidence,
+    )
+}
+
+fn graph_node_key(node_type: &str, id: &str) -> String {
+    format!("{}:{}", node_type.trim(), id.trim())
+}
+
+fn graph_label_key(node_type: &str, label: &str) -> String {
+    format!("{}:{}", node_type.trim(), normalize_label(label))
+}
+
+fn normalize_label(label: &str) -> String {
+    label.trim().to_lowercase()
 }

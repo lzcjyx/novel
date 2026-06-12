@@ -326,12 +326,11 @@ pub fn get_next_chapter_plan(
 }
 
 pub fn list_chapter_files(
-    _db: &Database,
+    db: &Database,
     project_id: &str,
     data_dir: &str,
 ) -> Result<Vec<ChapterFile>, String> {
-    let slug = crate::db::projects::slugify(project_id);
-    let dir_path = format!("{}/{}", data_dir, slug);
+    let dir_path = crate::db::projects::get_project_paper_dir(db, project_id, data_dir)?;
     let mut files = Vec::new();
 
     if let Ok(entries) = std::fs::read_dir(&dir_path) {
@@ -388,11 +387,12 @@ pub fn list_chapter_files(
 }
 
 pub fn read_chapter_file_content(
+    db: &Database,
     data_dir: &str,
     project_id: &str,
     filename: &str,
 ) -> Result<String, String> {
-    let slug = crate::db::projects::slugify(project_id);
-    let path = format!("{}/{}/{}", data_dir, slug, filename);
+    let dir = crate::db::projects::get_project_paper_dir(db, project_id, data_dir)?;
+    let path = format!("{}/{}", dir, filename);
     std::fs::read_to_string(&path).map_err(|e| format!("Read error: {}", e))
 }

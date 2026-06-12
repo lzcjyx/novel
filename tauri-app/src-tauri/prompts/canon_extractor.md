@@ -28,7 +28,8 @@ existing_canon:
 10. 标记可能需要人工确认的新 canon。
 11. 不得覆盖 locked canon。
 12. 对不确定内容设置 confidence < 0.7。
-13. 推断知识图谱关系边；必须使用 existing_canon 中已经存在的节点 ID，不要按名称臆造 ID。
+13. 推断知识图谱关系边；优先使用 existing_canon 中已经存在的节点 ID，不要臆造 ID。
+14. 如果无法确定节点 ID，但节点名称在同一 node_type 下精确且唯一，可以用 source_label / target_label 填写原始名称；不要使用模糊简称。
 
 输出 JSON schema：
 {
@@ -84,9 +85,11 @@ existing_canon:
   ],
   "knowledge_graph_edges": [
     {
-      "source_node_id": "existing node id",
+      "source_node_id": "existing node id | optional when source_label is exact unique",
+      "source_label": "exact existing node label | optional fallback",
       "source_node_type": "character | location | organization | item | world_lore | magic_system | canon_rule | plot_thread | foreshadowing | style_guide | timeline_event",
-      "target_node_id": "existing node id",
+      "target_node_id": "existing node id | optional when target_label is exact unique",
+      "target_label": "exact existing node label | optional fallback",
       "target_node_type": "character | location | organization | item | world_lore | magic_system | canon_rule | plot_thread | foreshadowing | style_guide | timeline_event",
       "edge_type": "appears_at | owns | member_of | investigates | causes | resolves | foreshadows | related_to | custom",
       "description": "string",

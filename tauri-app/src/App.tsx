@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, createContext, useContext } from "react";
+import { useState, useEffect, useCallback, createContext, useContext, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
@@ -9,12 +9,13 @@ interface ChapterPlan { id: string; sequence: number; title?: string; outline?: 
 interface ChapterVersion { id: string; chapter_id: string; version_number: number; version_type: string; title?: string; body_markdown?: string; word_count?: number; }
 interface AgentReview { id: string; agent_name: string; score?: number; pass?: boolean; blocking_issues: string; minor_issues: string; recommendations: string; }
 interface CanonPrecheckIssue { rule_type?: string; severity?: string; message?: string; evidence?: string; }
-interface ReviewScores { average_score?: number; final_score?: number; decision?: string; publish_allowed: boolean; blocking_issue_count: number; }
-interface AgentQualityScore { agent_name: string; review_count: number; average_score?: number; pass_rate?: number; blocking_issue_count: number; }
-interface ProjectQualitySummary { project_id: string; reviewed_chapter_count: number; publish_ready_count: number; revise_count: number; needs_human_review_count: number; average_score?: number; average_final_score?: number; total_blocking_issues: number; latest_decision?: string; latest_final_score?: number; agent_scores: AgentQualityScore[]; }
+interface ReviewScores { average_score?: NullableNumber; final_score?: NullableNumber; decision?: string; publish_allowed: boolean; blocking_issue_count: number; }
+interface AgentQualityScore { agent_name: string; review_count: number; average_score?: NullableNumber; pass_rate?: NullableNumber; blocking_issue_count: number; }
+interface ProjectQualitySummary { project_id: string; reviewed_chapter_count: number; publish_ready_count: number; revise_count: number; needs_human_review_count: number; average_score?: NullableNumber; average_final_score?: NullableNumber; total_blocking_issues: number; latest_decision?: string; latest_final_score?: NullableNumber; agent_scores: AgentQualityScore[]; }
 interface GenerationJob { id: string; chapter_plan_id: string; job_date: string; status: string; started_at: string; completed_at?: string; error_message?: string; retry_count: number; metadata: string; }
 interface JobPhaseEvent { step: string; status: string; detail?: string; progress_pct: number; elapsed_ms: number; duration_ms?: number; timestamp: string; }
 interface PipelineStep { step: string; status: string; detail?: string; progress_pct: number; timestamp: string; preview_title?: string; preview_text?: string; preview_kind?: string; }
+interface LiveProgressEntry { id: string; step: string; phase: string; status: string; percent: number; detail: string; timestamp: string; preview: boolean; }
 interface JobPhaseSummary { phase_count?: number; last_step?: string; last_status?: string; last_detail?: string; failure_reason?: string; completed_at?: string; total_elapsed_ms?: number; slow_phase_threshold_ms?: number; slowest_step?: string; slowest_duration_ms?: number; slow_step_count?: number; slow_steps?: JobPhaseEvent[]; updated_at?: string; }
 interface JobModelUsageEvent { phase: string; provider: string; model: string; prompt_tokens: number; completion_tokens: number; total_tokens: number; estimated_cost_usd?: number | null; timestamp: string; }
 interface JobUsageSummary { call_count?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; estimated_cost_usd?: number | null; updated_at?: string; }
@@ -25,8 +26,10 @@ interface BibleData { characters: any[]; locations: any[]; organizations: any[];
 interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; }
 interface Project { id: string; name: string; }
 interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; }
-interface RetrievalSource { rank: number; document_id: string; source_type: string; source_id?: string; title?: string; excerpt: string; similarity?: number; relevance_label: string; metadata: string; }
-interface RetrievalTrace { source_count: number; best_similarity?: number; sources: RetrievalSource[]; }
+type NullableNumber = number | null | undefined;
+
+interface RetrievalSource { rank: number; document_id: string; source_type: string; source_id?: string; title?: string; excerpt: string; similarity?: NullableNumber; relevance_label: string; metadata: string; }
+interface RetrievalTrace { source_count: number; best_similarity?: NullableNumber; sources: RetrievalSource[]; }
 interface GraphContextNode { id: string; node_type: string; label: string; }
 interface GraphContextNeighbor { id: string; node_type: string; label: string; edge_type: string; direction: string; depth?: number; via_id: string; via_type: string; via_label: string; description?: string; }
 interface GraphContext { seeds: GraphContextNode[]; neighbors: GraphContextNeighbor[]; source_keys: string[]; summary: string; }
@@ -36,6 +39,21 @@ interface KnowledgeGraphEdge { id: string; source_node_id: string; source_node_t
 interface KnowledgeGraphSnapshot { nodes: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[]; orphan_count: number; }
 interface KnowledgeGraphRetrievalHints { source_key: string; connected_source_keys: string[]; query_terms: string[]; }
 interface KnowledgeGraphNeighborhood { center: KnowledgeGraphNode; neighbors: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[]; retrieval_hints: KnowledgeGraphRetrievalHints; }
+
+const isFiniteNumber = (value: NullableNumber): value is number =>
+  typeof value === "number" && Number.isFinite(value);
+
+const formatNumber = (value: NullableNumber, digits = 1) =>
+  isFiniteNumber(value) ? value.toFixed(digits) : "n/a";
+
+const formatPercent = (value: NullableNumber) =>
+  isFiniteNumber(value) ? `${Math.round(value * 100)}%` : "n/a";
+
+const formatPassRate = (value: NullableNumber) =>
+  isFiniteNumber(value) ? `${formatPercent(value)} pass` : "n/a";
+
+const scoreColor = (value: NullableNumber) =>
+  isFiniteNumber(value) && value >= 85 ? "var(--success)" : "var(--primary)";
 
 // ---- Context ----
 interface AppContextType {
@@ -161,6 +179,20 @@ function Dashboard() {
   const [contextPreview, setContextPreview] = useState<WritingContextPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewMsg, setPreviewMsg] = useState("");
+  const [progressFeed, setProgressFeed] = useState<LiveProgressEntry[]>([]);
+  const liveProgressRef = useRef<HTMLDivElement | null>(null);
+
+  const pipelineOrder = ["acquire_lock","load_canon","retrieve_context","generate_draft","aggregate_reviews","revise","export","update_canon","complete"];
+  const pipelineLabels: Record<string,string> = {
+    acquire_lock:"获取生成锁",load_canon:"加载圣经数据",retrieve_context:"向量检索上下文",
+    generate_draft:"AI生成初稿",aggregate_reviews:"汇总审稿意见",
+    revise:"AI修订",export:"导出Markdown",update_canon:"更新圣经",complete:"完成"
+  };
+  const feedStatusClass = (status: string) => status.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const feedTime = (timestamp: string) => {
+    const parsed = new Date(timestamp);
+    return Number.isNaN(parsed.getTime()) ? timestamp.slice(0, 8) : parsed.toLocaleTimeString();
+  };
 
   // Listen for Tauri pipeline events
   useEffect(() => {
@@ -184,6 +216,22 @@ function Dashboard() {
         return [...prev, ev];
       });
       setProgress(`${Math.round(ev.progress_pct)}%`);
+      const previewDetail = ev.preview_text
+        ? `${ev.preview_kind || "preview"} received ${ev.preview_text.length.toLocaleString()} chars`
+        : "";
+      setProgressFeed((prev) => {
+        const entry: LiveProgressEntry = {
+          id: `${ev.timestamp || Date.now()}-${ev.step}-${ev.status}-${prev.length}`,
+          step: ev.step,
+          phase: pipelineLabels[ev.step] || ev.step,
+          status: ev.status,
+          percent: Math.round(ev.progress_pct),
+          detail: ev.detail || previewDetail || "step update",
+          timestamp: ev.timestamp || new Date().toISOString(),
+          preview: Boolean(ev.preview_text || ev.preview_kind),
+        };
+        return [...prev.slice(-99), entry];
+      });
     }).then((u) => { unlisten = u; });
     return () => { if (unlisten) unlisten(); };
   }, []);
@@ -193,8 +241,23 @@ function Dashboard() {
     setPipelineSteps([]); // Clear on new run
     setLivePreview(null);
     setVisiblePreview("");
+    setProgressFeed([{
+      id: `start-${Date.now()}`,
+      step: "start",
+      phase: "准备生成",
+      status: "running",
+      percent: 0,
+      detail: "等待生成 pipeline 返回进度",
+      timestamp: new Date().toISOString(),
+      preview: false,
+    }]);
     setProgress("Starting...");
   }, [loading]);
+
+  useEffect(() => {
+    const el = liveProgressRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [progressFeed]);
 
   useEffect(() => {
     if (!livePreview?.text) {
@@ -305,12 +368,6 @@ function Dashboard() {
   const ragSources = retrievalTrace?.sources || [];
   const graphContext = contextPreview?.graph_context;
   const graphNeighbors = graphContext?.neighbors || [];
-  const pipelineOrder = ["acquire_lock","load_canon","retrieve_context","generate_draft","aggregate_reviews","revise","export","update_canon","complete"];
-  const pipelineLabels: Record<string,string> = {
-    acquire_lock:"获取生成锁",load_canon:"加载圣经数据",retrieve_context:"向量检索上下文",
-    generate_draft:"AI生成初稿",aggregate_reviews:"汇总审稿意见",
-    revise:"AI修订",export:"导出Markdown",update_canon:"更新圣经",complete:"完成"
-  };
   const latestPhase = [...pipelineSteps].reverse().find(step => !step.preview_kind);
 
   return (
@@ -431,7 +488,7 @@ function Dashboard() {
                         <div className="rag-source-meta">{source.source_type}{source.source_id ? ` · ${source.source_id}` : ""}</div>
                       </div>
                       <div className={`rag-source-score rag-score-${source.relevance_label}`}>
-                        {source.similarity !== undefined ? source.similarity.toFixed(2) : "n/a"}
+                        {formatNumber(source.similarity, 2)}
                       </div>
                       <p className="rag-source-excerpt">{source.excerpt}</p>
                     </div>
@@ -474,6 +531,24 @@ function Dashboard() {
             })}
           </div>
           <div className="live-progress">{progress || (loading ? "Starting..." : "Idle")}</div>
+          <div className="live-progress-feed">
+            <div className="live-feed-head">
+              <span>Live Progress Feed</span>
+              <strong>{progressFeed.length ? `${progressFeed[progressFeed.length - 1].percent}%` : "Idle"}</strong>
+            </div>
+            <div className="live-feed-lines" ref={liveProgressRef} role="log" aria-live="polite">
+              {progressFeed.length > 0 ? progressFeed.map(entry => (
+                <div key={entry.id} className={`live-feed-line live-feed-${feedStatusClass(entry.status)} ${entry.preview ? "preview" : ""}`}>
+                  <span className="live-feed-time">{feedTime(entry.timestamp)}</span>
+                  <strong>{entry.phase}</strong>
+                  <em>{entry.status} · {entry.percent}%</em>
+                  <p>{entry.detail}</p>
+                </div>
+              )) : (
+                <div className="live-feed-empty">Start chapter generation to stream progress here.</div>
+              )}
+            </div>
+          </div>
           <div className="live-writer-preview">
             <div className="live-preview-head">
               <span>{livePreview ? `${livePreview.kind} preview` : "Draft preview"}</span>
@@ -762,7 +837,7 @@ function ReviewPage() {
         <section className="quality-dashboard">
           <div className="quality-stat-grid">
             <div><strong>{qualitySummary.reviewed_chapter_count}</strong><span>Reviewed</span></div>
-            <div><strong>{qualitySummary.average_final_score !== undefined ? qualitySummary.average_final_score.toFixed(1) : "n/a"}</strong><span>Avg Final</span></div>
+            <div><strong>{formatNumber(qualitySummary.average_final_score, 1)}</strong><span>Avg Final</span></div>
             <div><strong>{qualitySummary.publish_ready_count}</strong><span>Ready</span></div>
             <div><strong>{qualitySummary.revise_count}</strong><span>Revise</span></div>
             <div><strong>{qualitySummary.needs_human_review_count}</strong><span>Human Review</span></div>
@@ -775,7 +850,7 @@ function ReviewPage() {
             </div>
             <div>
               <div className="status-label">Latest Score</div>
-              <div className="quality-latest">{qualitySummary.latest_final_score !== undefined ? qualitySummary.latest_final_score.toFixed(0) : "n/a"}</div>
+              <div className="quality-latest">{formatNumber(qualitySummary.latest_final_score, 0)}</div>
             </div>
           </div>
           {qualitySummary.agent_scores.length > 0 && (
@@ -786,8 +861,8 @@ function ReviewPage() {
                     <div className="agent-quality-name">{agentNames[agent.agent_name] || agent.agent_name}</div>
                     <div className="text-meta">{agent.review_count} reviews · {agent.blocking_issue_count} blocking</div>
                   </div>
-                  <div className="agent-quality-score">{agent.average_score !== undefined ? agent.average_score.toFixed(1) : "n/a"}</div>
-                  <div className="agent-quality-pass">{agent.pass_rate !== undefined ? `${Math.round(agent.pass_rate * 100)}% pass` : "n/a"}</div>
+                  <div className="agent-quality-score">{formatNumber(agent.average_score, 1)}</div>
+                  <div className="agent-quality-pass">{formatPassRate(agent.pass_rate)}</div>
                 </div>
               ))}
             </div>
@@ -801,9 +876,9 @@ function ReviewPage() {
       {scores && (
         <div className="card-feature" style={{ marginBottom: 16 }}>
           <div style={{ fontFamily: "var(--font-display)", fontSize: 22, fontWeight: 300, color: "var(--on-dark)" }}>
-            Final Score: <span style={{ color: scores.final_score! >= 85 ? "var(--success)" : "var(--primary)" }}>{scores.final_score?.toFixed(0)}</span>
+            Final Score: <span style={{ color: scoreColor(scores.final_score) }}>{formatNumber(scores.final_score, 0)}</span>
           </div>
-          <div className="text-meta" style={{ marginTop: 4 }}>Decision: {scores.decision} · Avg: {scores.average_score?.toFixed(1)} · Blocking: {scores.blocking_issue_count} · Publish: {scores.publish_allowed ? "Yes" : "No"}</div>
+          <div className="text-meta" style={{ marginTop: 4 }}>Decision: {scores.decision} · Avg: {formatNumber(scores.average_score, 1)} · Blocking: {scores.blocking_issue_count} · Publish: {scores.publish_allowed ? "Yes" : "No"}</div>
         </div>
       )}
       {canonIssues.length > 0 && (
@@ -838,7 +913,31 @@ function ReviewPage() {
 function JobsPage() {
   const { selected } = useApp();
   const [jobs, setJobs] = useState<GenerationJob[]>([]);
-  useEffect(() => { if (selected) invoke<GenerationJob[]>("get_generation_jobs", { projectId: selected }).then(setJobs).catch(e => console.error(e)); }, [selected]);
+  const loadJobs = useCallback(() => {
+    if (!selected) {
+      setJobs([]);
+      return;
+    }
+    invoke<GenerationJob[]>("get_generation_jobs", { projectId: selected }).then(setJobs).catch(e => console.error(e));
+  }, [selected]);
+
+  useEffect(() => {
+    loadJobs();
+    const timer = window.setInterval(loadJobs, 5000);
+    const handleVisibility = () => {
+      if (!document.hidden) loadJobs();
+    };
+    let unlisten: (() => void) | null = null;
+    listen("app-resume", loadJobs).then((u) => { unlisten = u; });
+    window.addEventListener("focus", loadJobs);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      window.clearInterval(timer);
+      if (unlisten) unlisten();
+      window.removeEventListener("focus", loadJobs);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [loadJobs]);
 
   const color = (s: string) => s === "completed" ? "var(--success)" : s === "failed" ? "var(--warning)" : s === "needs_human_review" ? "#f39c12" : "var(--primary)";
   const phaseLabels: Record<string, string> = {
@@ -1061,6 +1160,29 @@ function KnowledgeGraphPage() {
 
   useEffect(() => { loadGraph(); }, [loadGraph]);
 
+  useEffect(() => {
+    if (!selected) return;
+    const refreshGraph = () => { loadGraph(); };
+    const handleVisibility = () => {
+      if (!document.hidden) refreshGraph();
+    };
+    let unlistenResume: (() => void) | null = null;
+    let unlistenPipeline: (() => void) | null = null;
+    listen("app-resume", refreshGraph).then((u) => { unlistenResume = u; });
+    listen("pipeline-step", (event: any) => {
+      const ev = event.payload as PipelineStep;
+      if (ev.step === "update_canon" || ev.step === "complete") refreshGraph();
+    }).then((u) => { unlistenPipeline = u; });
+    window.addEventListener("focus", refreshGraph);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      if (unlistenResume) unlistenResume();
+      if (unlistenPipeline) unlistenPipeline();
+      window.removeEventListener("focus", refreshGraph);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [selected, loadGraph]);
+
   const nodes = snapshot?.nodes || [];
   const edges = snapshot?.edges || [];
   const nodeById = new Map(nodes.map(node => [node.id, node]));
@@ -1081,6 +1203,14 @@ function KnowledgeGraphPage() {
       ? neighborhood.edges
       : edges.filter(edge => edge.source_node_id === selectedNode.id || edge.target_node_id === selectedNode.id)
     : [];
+  const selectedDegree = selectedNode ? connectedEdges.length : 0;
+  const graphEmptyMessage = nodes.length === 0
+    ? "No graph nodes yet. Generate canon or write a chapter to build the graph."
+    : visibleNodes.length === 0
+      ? "No matching nodes."
+      : visibleEdges.length === 0
+        ? "Nodes are available, but no relationships yet. Generate a chapter or add an edge."
+        : "";
 
   useEffect(() => {
     if (nodes.length >= 2 && (!edgeForm.sourceId || !nodeById.has(edgeForm.sourceId))) {
@@ -1194,6 +1324,7 @@ function KnowledgeGraphPage() {
           <div className="graph-stat"><strong>{nodes.length}</strong><span>Nodes</span></div>
           <div className="graph-stat"><strong>{edges.length}</strong><span>Edges</span></div>
           <div className="graph-stat"><strong>{snapshot?.orphan_count ?? 0}</strong><span>Orphans</span></div>
+          <div className="graph-stat"><strong>{selectedDegree}</strong><span>Selected Degree</span></div>
           <input className="text-input graph-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search canon..." />
         </div>
 
@@ -1208,12 +1339,25 @@ function KnowledgeGraphPage() {
 
         <div className="graph-layout">
           <section className="graph-canvas">
-            <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none">
-              {visibleEdges.map(edge => {
+            <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Knowledge graph relationships">
+              {visibleEdges.map((edge, edgeIndex) => {
                 const source = positions.get(edge.source_node_id);
                 const target = positions.get(edge.target_node_id);
+                const sourceNode = nodeById.get(edge.source_node_id);
+                const targetNode = nodeById.get(edge.target_node_id);
                 if (!source || !target) return null;
-                return <line key={edge.id} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
+                const isSelectedEdge = Boolean(selectedNode && (
+                  (edge.source_node_id === selectedNode.id && edge.source_node_type === selectedNode.node_type) ||
+                  (edge.target_node_id === selectedNode.id && edge.target_node_type === selectedNode.node_type)
+                ));
+                const label = `${sourceNode?.label || edge.source_node_id} ${edge.edge_type} ${targetNode?.label || edge.target_node_id}`;
+                return (
+                  <g key={edge.id} className={`graph-edge ${isSelectedEdge ? "active" : ""}`}>
+                    <title>{edge.description ? `${label}: ${edge.description}` : label}</title>
+                    <line className="graph-edge-base" x1={source.x} y1={source.y} x2={target.x} y2={target.y} />
+                    <line className="graph-edge-flow" x1={source.x} y1={source.y} x2={target.x} y2={target.y} style={{ animationDelay: `${(edgeIndex % 6) * -0.22}s` }} />
+                  </g>
+                );
               })}
             </svg>
             {visibleNodes.map(node => {
@@ -1225,6 +1369,8 @@ function KnowledgeGraphPage() {
                   style={{ left: `${pos.x}%`, top: `${pos.y}%` }}
                   onClick={() => setSelectedNodeId(node.id)}
                   title={`${node.label} (${typeLabel(node.node_type)})`}
+                  aria-label={`${node.label}, ${typeLabel(node.node_type)}, ${node.degree} relationships`}
+                  aria-pressed={selectedNode?.id === node.id}
                   type="button"
                 >
                   <span>{node.label}</span>
@@ -1232,7 +1378,7 @@ function KnowledgeGraphPage() {
                 </button>
               );
             })}
-            {visibleNodes.length === 0 && <div className="graph-empty">No matching nodes.</div>}
+            {graphEmptyMessage && <div className={`graph-empty ${visibleNodes.length > 0 ? "graph-empty-compact" : ""}`}>{graphEmptyMessage}</div>}
           </section>
 
           <aside className="graph-inspector">
@@ -1459,14 +1605,17 @@ function SaveField({ label, value, type = "text", onSave }: { label: string; val
 // ---- LearnPage ----
 function LearnPage() {
   const { selected } = useApp();
-  const [tab, setTab] = useState<"input"|"web"|"library">("library");
-  const [text, setText] = useState("");
+  const [tab, setTab] = useState<"file"|"web"|"library">("library");
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [sourceTitle, setSourceTitle] = useState("");
   const [url, setUrl] = useState("");
   const [learning, setLearning] = useState(false);
   const [result, setResult] = useState("");
   const [entries, setEntries] = useState<any[]>([]);
   const [expandedId, setExpandedId] = useState<string|null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const learningFileAccept = ".txt,.md,.markdown,.text,.log,.csv,.json,.html";
+  const maxLearningFileBytes = 1_048_576;
 
   const loadEntries = async () => {
     if (!selected) return;
@@ -1475,59 +1624,49 @@ function LearnPage() {
 
   useEffect(() => { loadEntries(); }, [selected]);
 
-  const handleLearnText = async () => {
-    if (!text.trim()) return;
-    setLearning(true); setResult("Extracting patterns...");
+  const handleFileSelected = (event: { currentTarget: HTMLInputElement }) => {
+    const file = event.currentTarget.files?.[0] || null;
+    setSelectedFile(file);
+    setResult("");
+    if (file && !sourceTitle.trim()) setSourceTitle(file.name);
+  };
+
+  const handleLearnFile = async () => {
+    const file = selectedFile;
+    if (!file) return;
+    if (!selected) { setResult("Error: Select a project first."); return; }
+    if (file.size > maxLearningFileBytes) { setResult("Error: File too large (>1 MiB)."); return; }
+    setLearning(true); setResult("Reading file...");
     try {
-      const r = await invoke<any[]>("learn_from_text", { projectId: selected, text, sourceTitle: sourceTitle || "User Input" });
+      const text = await file.text();
+      setResult("Extracting patterns...");
+      const r = await invoke<any[]>("learn_from_file_text", {
+        projectId: selected,
+        fileName: file.name,
+        byteLen: file.size,
+        text,
+        sourceTitle: sourceTitle.trim() || null,
+      });
       setResult(`Learned ${r.length} patterns`);
-      setText(""); setSourceTitle("");
+      setSelectedFile(null); setSourceTitle("");
+      if (fileInputRef.current) fileInputRef.current.value = "";
       loadEntries();
-    } catch (e) { setResult("Error: " + e); }
-    setLearning(false);
+    } catch (e: any) { setResult("Error: " + (e.message || String(e))); }
+    finally { setLearning(false); }
   };
 
   const handleLearnUrl = async () => {
     if (!url.trim()) return;
-    // Normalize URL (add https:// if no protocol)
-    let fetchUrl = url.trim();
-    if (!/^https?:\/\//i.test(fetchUrl)) fetchUrl = "https://" + fetchUrl;
-    setLearning(true); setResult("Fetching page...");
+    if (!selected) { setResult("Error: Select a project first."); return; }
+    setLearning(true); setResult("Fetching and extracting page...");
     try {
-      let html: string;
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 30000);
-        const resp = await fetch(fetchUrl, { signal: controller.signal });
-        clearTimeout(timer);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        html = await resp.text();
-      } catch {
-        setResult("Frontend blocked, trying backend...");
-        html = await invoke<string>("fetch_url_text", { url: fetchUrl });
-      }
-      if (html.length > 1_000_000) throw new Error("Page too large (>1MB)");
-
-      // Strip HTML tags in JS (same logic as Rust, no crash risk)
-      let raw = html.replace(/<br\s*\/?>/gi, "\n").replace(/<\/?p[^>]*>/gi, "\n");
-      raw = raw.replace(/<[^>]*>/g, "");
-      raw = raw.replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-      raw = raw.replace(/&quot;/g, "\"").replace(/&#39;/g, "'");
-      const lines = raw.split("\n").map(l => l.trim()).filter(l =>
-        l.length > 40 && !l.startsWith("function") && !l.startsWith("var ") &&
-        !l.toLowerCase().includes("cookie") && !l.toLowerCase().includes("subscribe")
-      );
-      const text = lines.join("\n").slice(0, 15000);
-      if (text.length < 200) throw new Error("No meaningful content found. Try a page with article/novel text.");
-
       setResult("Extracting patterns...");
-      const sourceTitle = url.split("/").pop() || "web source";
-      const r = await invoke<any[]>("learn_from_text", { projectId: selected, text, sourceTitle, sourceType: "web" });
+      const r = await invoke<any[]>("learn_from_url", { projectId: selected, url: url.trim() });
       setResult(`Learned ${r.length} patterns`);
       setUrl("");
       loadEntries();
     } catch (e: any) { setResult("Error: " + (e.message || String(e))); }
-    setLearning(false);
+    finally { setLearning(false); }
   };
 
   const handleDelete = async (id: string) => {
@@ -1545,16 +1684,23 @@ function LearnPage() {
     <>
       <h2 className="page-title">Learn & Evolve</h2>
       <div className="tab-bar">
-        <button className={`tab-btn ${tab==="input"?"active":""}`} onClick={()=>setTab("input")}>Manual Input</button>
+        <button className={`tab-btn ${tab==="file"?"active":""}`} onClick={()=>setTab("file")}>File Learn</button>
         <button className={`tab-btn ${tab==="web"?"active":""}`} onClick={()=>setTab("web")}>Web Learn</button>
         <button className={`tab-btn ${tab==="library"?"active":""}`} onClick={()=>{setTab("library");loadEntries();}}>Knowledge Library ({entries.length})</button>
       </div>
 
-      {tab === "input" && (
+      {tab === "file" && (
         <div className="card-feature">
-          <div className="bible-edit-field"><label>Source Title (e.g. 鲁迅《狂人日记》)</label><input className="text-input" value={sourceTitle} onChange={e=>setSourceTitle(e.target.value)} placeholder="Source name..." /></div>
-          <div className="bible-edit-field"><label>Paste sample novel text</label><textarea className="content-editor" value={text} onChange={e=>setText(e.target.value)} placeholder="Paste up to 10000 characters of sample text..."/></div>
-          <button className="btn btn-primary" onClick={handleLearnText} disabled={learning||!text.trim()}>{learning?"Extracting...":"Extract Knowledge"}</button>
+          <div className="bible-edit-field"><label>Source Title</label><input className="text-input" value={sourceTitle} onChange={e=>setSourceTitle(e.target.value)} placeholder={selectedFile?.name || "Source name..."} /></div>
+          <input ref={fileInputRef} type="file" accept={learningFileAccept} onChange={handleFileSelected} style={{display:"none"}} />
+          <div className="bible-edit-field">
+            <label>Source File</label>
+            <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+              <button className="btn btn-secondary" onClick={()=>fileInputRef.current?.click()} disabled={learning}>Choose File</button>
+              <span className="text-meta">{selectedFile ? `${selectedFile.name} (${Math.ceil(selectedFile.size / 1024)} KB)` : "No file selected"}</span>
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={handleLearnFile} disabled={learning||!selectedFile}>{learning?"Extracting...":"Extract Knowledge"}</button>
           {result && <div className={`msg-banner ${result.includes("Error")?"msg-error":"msg-success"}`} style={{marginTop:8}}>{result}</div>}
         </div>
       )}
@@ -1569,7 +1715,7 @@ function LearnPage() {
 
       {tab === "library" && (
         <div className="status-grid" style={{gridTemplateColumns:"1fr"}}>
-          {entries.length === 0 && <div className="text-meta">No learned patterns yet. Paste sample text or use Web Learn to build your knowledge base.</div>}
+          {entries.length === 0 && <div className="text-meta">No learned patterns yet. Import a file or use Web Learn to build your knowledge base.</div>}
           {entries.map((e: any) => (
             <div key={e.id} className="card" style={{cursor:"pointer", borderLeft:`3px solid ${catColors[e.category]||"var(--hairline-dark)"}`}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}} onClick={()=>setExpandedId(expandedId===e.id?null:e.id)}>

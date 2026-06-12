@@ -1,5 +1,5 @@
-use crate::db::connection::Database;
 use crate::ai::client::ModelClient;
+use crate::db::connection::Database;
 
 pub async fn ingest_bible_note(
     db: &Database,
@@ -48,7 +48,8 @@ pub async fn ingest_bible_note(
                 "INSERT OR IGNORE INTO locations (id, project_id, name, description, type)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![
-                    id, project_id,
+                    id,
+                    project_id,
                     loc["name"].as_str().unwrap_or(""),
                     loc.get("description").and_then(|v| v.as_str()),
                     loc.get("type").and_then(|v| v.as_str()),

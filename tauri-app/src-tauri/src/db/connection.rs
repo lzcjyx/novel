@@ -13,17 +13,19 @@ impl Database {
                 .map_err(|e| format!("Cannot create data directory: {}", e))?;
         }
 
-        let conn = Connection::open(path)
-            .map_err(|e| format!("Cannot open database: {}", e))?;
+        let conn = Connection::open(path).map_err(|e| format!("Cannot open database: {}", e))?;
 
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
-             PRAGMA synchronous = NORMAL;"
-        ).map_err(|e| format!("Cannot set pragmas: {}", e))?;
+             PRAGMA synchronous = NORMAL;",
+        )
+        .map_err(|e| format!("Cannot set pragmas: {}", e))?;
 
-        Ok(Database { conn: Mutex::new(conn) })
+        Ok(Database {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn new_uuid() -> String {

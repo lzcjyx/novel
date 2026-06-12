@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -8,12 +9,17 @@ use tauri_app_lib::db::connection::Database;
 use tauri_app_lib::workflow::prompt_rendering::{
     find_unresolved_placeholders, render_prompt_strict,
 };
+use tauri_app_lib::workflow::review_agents::{self, CanonContext};
 
 fn setup_db() -> Database {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("core-loop.db");
+    let export_dir = dir.path().join("exports").to_string_lossy().to_string();
     let db = Database::open(&db_path).unwrap();
     tauri_app_lib::db::run_migrations(&db).unwrap();
+    let mut settings = tauri_app_lib::db::settings::get_settings(&db).unwrap();
+    settings.data_dir = export_dir;
+    tauri_app_lib::db::settings::save_settings(&db, &settings).unwrap();
     std::mem::forget(dir);
     db
 }
@@ -33,6 +39,69 @@ fn insert_project(db: &Database) -> String {
     )
     .unwrap()
     .id
+}
+
+fn review_chapter(project_id: &str) -> tauri_app_lib::models::Chapter {
+    tauri_app_lib::models::Chapter {
+        id: "chapter-review".to_string(),
+        project_id: project_id.to_string(),
+        chapter_plan_id: Some("plan-review".to_string()),
+        sequence: 1,
+        title: Some("评审章节".to_string()),
+        final_version_id: Some("version-review".to_string()),
+        status: "draft".to_string(),
+        word_count: Some(1200),
+        summary: Some("主角发现第一个线索。".to_string()),
+        published_at: None,
+        metadata: "{}".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn review_version(project_id: &str) -> tauri_app_lib::models::ChapterVersion {
+    tauri_app_lib::models::ChapterVersion {
+        id: "version-review".to_string(),
+        chapter_id: "chapter-review".to_string(),
+        project_id: project_id.to_string(),
+        version_number: 1,
+        version_type: "draft".to_string(),
+        title: Some("评审章节".to_string()),
+        body_markdown: Some(
+            "月光落在旧站台上，主角没有立刻解释恐惧，只把钥匙攥进掌心。".repeat(40),
+        ),
+        summary: Some("主角发现第一个线索。".to_string()),
+        word_count: Some(1200),
+        model_provider: None,
+        model_name: None,
+        prompt_hash: None,
+        context_hash: None,
+        created_by_agent: None,
+        metadata: "{}".to_string(),
+        created_at: String::new(),
+        updated_at: String::new(),
+    }
+}
+
+fn empty_review_canon() -> CanonContext {
+    CanonContext {
+        writing_brief_json: "{}".to_string(),
+        characters_json: "[]".to_string(),
+        character_states_json: "[]".to_string(),
+        previous_chapters_json: "[]".to_string(),
+        active_plot_threads_json: "[]".to_string(),
+        unresolved_foreshadowing_json: "[]".to_string(),
+        world_lore_json: "[]".to_string(),
+        locations_json: "[]".to_string(),
+        organizations_json: "[]".to_string(),
+        items_json: "[]".to_string(),
+        magic_systems_json: "[]".to_string(),
+        canon_rules_json: "[]".to_string(),
+        timeline_json: "[]".to_string(),
+        style_guide_json: "[]".to_string(),
+        blog_config_json: "{}".to_string(),
+        project_policy_json: "{}".to_string(),
+    }
 }
 
 #[test]
@@ -69,6 +138,97 @@ fn weekly_planner_prompt_is_registered_and_dedicated() {
     assert!(prompt.contains("WEEKLY_PLANNER_CONTEXT_JSON"));
     assert!(!prompt.contains("style_reviewer"));
     assert!(!prompt.contains("review_arbiter"));
+}
+
+#[test]
+fn weekly_planner_prompt_preserves_longform_pacing() {
+    let prompt = tauri_app_lib::prompts::load_prompt("weekly_planner")
+        .expect("weekly planner prompt should be registered");
+
+    assert!(prompt.contains("longform pacing"));
+    assert!(prompt.contains("must not resolve"));
+    assert!(prompt.contains("next local movement"));
+    assert!(prompt.contains("story_phase"));
+    assert!(prompt.contains("story_progress_percent"));
+    assert!(prompt.contains("endgame"));
+}
+
+#[test]
+fn weekly_planner_context_includes_story_progress_and_recent_summaries() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    for sequence in 1..=5 {
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, sequence, title, status, word_count, summary)
+             VALUES (?1, ?2, ?3, ?4, 'final', 3000, ?5)",
+            rusqlite::params![
+                format!("chapter-{sequence}"),
+                project_id,
+                sequence,
+                format!("第{sequence}章"),
+                format!("第{sequence}章摘要，主角只推进局部线索。")
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+         VALUES ('plan-next', ?1, 6, '下一步', '继续局部推进，不解决终局。', 3000, 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let context =
+        tauri_app_lib::workflow::weekly_planner::build_weekly_planner_context(&db, &project_id)
+            .expect("weekly planner context should build");
+
+    assert_eq!(context["estimated_total_chapters"].as_i64(), Some(167));
+    assert_eq!(context["chapters_written"].as_u64(), Some(5));
+    assert_eq!(context["next_sequence"].as_i64(), Some(6));
+    assert_eq!(context["story_phase"].as_str(), Some("opening"));
+    assert!(context["story_progress_percent"].as_f64().unwrap() > 2.9);
+    assert!(context["story_progress_percent"].as_f64().unwrap() < 3.1);
+    assert!(context["recent_chapter_summaries"]
+        .to_string()
+        .contains("第5章摘要"));
+    assert!(context["pacing_directive"]
+        .as_str()
+        .unwrap_or("")
+        .contains("next local movement"));
+}
+
+#[test]
+fn continuity_prompt_does_not_treat_missing_rag_as_blocking() {
+    let prompt = tauri_app_lib::prompts::load_prompt("continuity_reviewer")
+        .expect("continuity reviewer prompt should be registered");
+
+    assert!(prompt.contains("RAG"));
+    assert!(prompt.contains("not a blocking"));
+}
+
+#[test]
+fn style_reviewer_prompt_defines_consistent_score_rubric() {
+    let prompt = tauri_app_lib::prompts::load_prompt("style_reviewer")
+        .expect("style reviewer prompt should be registered");
+
+    assert!(prompt.contains("90-100"));
+    assert!(prompt.contains("75-89"));
+    assert!(prompt.contains("score >= 75"));
+    assert!(prompt.contains("pass=true"));
+    assert!(prompt.contains("0-20"));
+}
+
+#[test]
+fn bible_generation_prompt_treats_first_ten_plans_as_opening_arc() {
+    let prompt = tauri_app_lib::prompts::load_prompt("bible_generation")
+        .expect("bible generation prompt should be registered");
+
+    assert!(prompt.contains("first 10 immediate chapter plans"));
+    assert!(prompt.contains("opening movement"));
+    assert!(prompt.contains("2-5%"));
+    assert!(prompt.contains("must not resolve"));
 }
 
 #[test]
@@ -216,6 +376,8 @@ fn chapter_plan_can_be_marked_completed() {
 struct CapturingProvider {
     systems: Arc<Mutex<Vec<String>>>,
     users: Arc<Mutex<Vec<String>>>,
+    embed_calls: Arc<Mutex<usize>>,
+    canon_graph_edges: bool,
     review_text: Option<String>,
     usage: Option<ModelUsageReport>,
 }
@@ -242,6 +404,25 @@ impl ModelClient for CapturingProvider {
         }
 
         if system.contains("canon_extractor") {
+            if self.canon_graph_edges {
+                return Ok(json!({
+                    "chapter_summary": "最终修订稿进入圣经",
+                    "character_state_updates": [],
+                    "timeline_events": [],
+                    "new_lore": [],
+                    "foreshadowing_updates": [],
+                    "vector_documents": [],
+                    "knowledge_graph_edges": [{
+                        "source_node_id": "missing-source",
+                        "source_node_type": "character",
+                        "target_node_id": "missing-target",
+                        "target_node_type": "location",
+                        "edge_type": "visited",
+                        "confidence": 0.7
+                    }],
+                    "human_review_required": []
+                }));
+            }
             return Ok(json!({
                 "chapter_summary": "最终修订稿进入圣经",
                 "character_state_updates": [],
@@ -294,8 +475,68 @@ impl ModelClient for CapturingProvider {
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        *self.embed_calls.lock().unwrap() += 1;
         Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
     }
+}
+
+#[tokio::test]
+async fn reviewer_wrapped_chinese_low_score_does_not_panic_or_default_to_zero() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let chapter = review_chapter(&project_id);
+    let version = review_version(&project_id);
+    let canon = empty_review_canon();
+    let prefix = format!("x{}\n", "级".repeat(140));
+    let provider = CapturingProvider {
+        review_text: Some(format!(
+            "{}{}",
+            prefix,
+            r#"{"score":9,"pass":false,"blocking_issues":[],"minor_issues":[{"id":"S001","issue":"语言质量低","evidence":"级别描述重复","recommendation":"重写句群"}],"recommendations":[]}"#
+        )),
+        ..Default::default()
+    };
+
+    let reviews = review_agents::run_review_agents(&provider, &chapter, &version, &canon, &project)
+        .await
+        .expect("wrapped Chinese review output should be parsed safely");
+    let style = reviews
+        .iter()
+        .find(|review| review.agent_name == "style_reviewer")
+        .expect("style review should be present");
+
+    assert_eq!(style.score, Some(9));
+    assert_eq!(style.pass, Some(false));
+    assert!(style.raw_output.contains("\"score\":9"));
+}
+
+#[tokio::test]
+async fn reviewer_preserves_high_score_from_wrapped_json_output() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let chapter = review_chapter(&project_id);
+    let version = review_version(&project_id);
+    let canon = empty_review_canon();
+    let provider = CapturingProvider {
+        review_text: Some(
+            "模型评审如下：\n```json\n{\"score\":95,\"pass\":true,\"blocking_issues\":[],\"minor_issues\":[],\"recommendations\":[]}\n```\n请查收。"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+
+    let reviews = review_agents::run_review_agents(&provider, &chapter, &version, &canon, &project)
+        .await
+        .expect("fenced review output should parse");
+    let continuity = reviews
+        .iter()
+        .find(|review| review.agent_name == "continuity_reviewer")
+        .expect("continuity review should be present");
+
+    assert_eq!(continuity.score, Some(95));
+    assert_eq!(continuity.pass, Some(true));
 }
 
 #[tokio::test]
@@ -348,7 +589,7 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     let result = tauri_app_lib::workflow::chapter_production::generate_next_chapter(
         &db,
         &provider,
-        None,
+        Some(&provider),
         &project_id,
         true,
         &log_tx,
@@ -449,6 +690,190 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
         .as_deref()
         .unwrap_or("")
         .contains("最终稿正文"));
+}
+
+#[test]
+fn markdown_export_uses_persisted_project_paper_dir_after_settings_change() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let fallback_dir = tempfile::tempdir().unwrap();
+    let persisted_parent = tempfile::tempdir().unwrap();
+    let persisted_dir = persisted_parent
+        .path()
+        .join("chosen-storage")
+        .to_string_lossy()
+        .to_string();
+    tauri_app_lib::db::projects::set_project_paper_dir(&db, &project_id, &persisted_dir).unwrap();
+
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapters (id, project_id, sequence, title, status, word_count, summary)
+         VALUES ('chapter-export', ?1, 1, '导出章节', 'final', 1200, '导出摘要')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO chapter_versions
+         (id, chapter_id, project_id, version_number, version_type, title, body_markdown, summary, word_count)
+         VALUES ('version-export', 'chapter-export', ?1, 1, 'final', '导出章节', '正文需要写入用户选择的位置。', '导出摘要', 1200)",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE chapters SET final_version_id = 'version-export' WHERE id = 'chapter-export'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let exported = tauri_app_lib::export::markdown::export_chapter_markdown(
+        &db,
+        "chapter-export",
+        fallback_dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+
+    assert!(Path::new(&exported).starts_with(&persisted_dir));
+    assert!(Path::new(&exported).exists());
+    assert!(!fallback_dir
+        .path()
+        .join(tauri_app_lib::db::projects::slugify(&project_id))
+        .exists());
+
+    let content = tauri_app_lib::db::chapters::read_chapter_file_content(
+        &db,
+        fallback_dir.path().to_str().unwrap(),
+        &project_id,
+        "ch001.md",
+    )
+    .unwrap();
+    assert!(content.contains("正文需要写入用户选择的位置。"));
+
+    let files = tauri_app_lib::db::chapters::list_chapter_files(
+        &db,
+        &project_id,
+        fallback_dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].filename, "ch001.md");
+}
+
+#[test]
+fn project_cleanup_dirs_include_persisted_and_current_fallback_dirs() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let fallback_dir = tempfile::tempdir().unwrap();
+    let persisted_parent = tempfile::tempdir().unwrap();
+    let persisted_dir = persisted_parent
+        .path()
+        .join("original-storage")
+        .to_string_lossy()
+        .to_string();
+    tauri_app_lib::db::projects::set_project_paper_dir(&db, &project_id, &persisted_dir).unwrap();
+
+    let cleanup_dirs = tauri_app_lib::db::projects::project_paper_dirs_for_cleanup(
+        &db,
+        &project_id,
+        fallback_dir.path().to_str().unwrap(),
+    )
+    .unwrap();
+    let fallback_project_dir =
+        tauri_app_lib::db::projects::paper_dir(fallback_dir.path().to_str().unwrap(), &project_id);
+
+    assert!(cleanup_dirs.contains(&persisted_dir));
+    assert!(cleanup_dirs.contains(&fallback_project_dir));
+    assert_eq!(cleanup_dirs.len(), 2);
+}
+
+#[tokio::test]
+async fn chapter_pipeline_completes_when_canon_update_fails_after_content_save() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+         VALUES ('plan-canon-noncritical', ?1, 1, '后处理失败', '章节已经保存后 canon 更新失败', 3000, 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute("DROP TABLE knowledge_graph_edges", [])
+        .unwrap();
+    drop(conn);
+
+    let provider = CapturingProvider {
+        canon_graph_edges: true,
+        ..Default::default()
+    };
+    let (log_tx, _log_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+
+    let result = tauri_app_lib::workflow::chapter_production::generate_next_chapter(
+        &db,
+        &provider,
+        None,
+        &project_id,
+        true,
+        &log_tx,
+        &event_tx,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(result.ok);
+    let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
+    assert_eq!(jobs[0].status, "completed");
+
+    let mut saw_noncritical_canon_failure = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if event.step == "update_canon" && event.status == "failed_noncritical" {
+            saw_noncritical_canon_failure = true;
+        }
+    }
+    assert!(saw_noncritical_canon_failure);
+}
+
+#[tokio::test]
+async fn chapter_pipeline_does_not_use_main_provider_for_rag_when_embeddings_are_disabled() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+         VALUES ('plan-no-rag', ?1, 1, '无向量上下文', '不配置 embedding 时也要正常写作', 3000, 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let provider = CapturingProvider::default();
+    let (log_tx, _log_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(100);
+
+    let result = tauri_app_lib::workflow::chapter_production::generate_next_chapter(
+        &db,
+        &provider,
+        None,
+        &project_id,
+        true,
+        &log_tx,
+        &event_tx,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(result.ok);
+    assert_eq!(*provider.embed_calls.lock().unwrap(), 0);
+
+    let mut retrieve_detail = String::new();
+    while let Ok(event) = event_rx.try_recv() {
+        if event.step == "retrieve_context" {
+            retrieve_detail = event.detail.unwrap_or_default();
+        }
+    }
+    assert!(retrieve_detail.contains("RAG disabled"));
 }
 
 #[tokio::test]
