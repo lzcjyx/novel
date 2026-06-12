@@ -245,6 +245,100 @@ impl ModelClient for CanonGraphEdgeProvider {
     }
 }
 
+struct CanonGraphLabelEdgeProvider;
+
+#[async_trait]
+impl ModelClient for CanonGraphLabelEdgeProvider {
+    async fn generate_json(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _json_schema: &Value,
+        _max_tokens: u32,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "chapter_summary": "林白在旧车站发现新线索。",
+            "character_state_updates": [],
+            "timeline_events": [],
+            "new_lore": [],
+            "foreshadowing_updates": [],
+            "vector_documents": [],
+            "knowledge_graph_edges": [
+                {
+                    "source_label": "林白",
+                    "source_node_type": "character",
+                    "target_label": "旧车站",
+                    "target_node_type": "location",
+                    "edge_type": "investigates_at",
+                    "description": "林白在旧车站调查雨夜案。",
+                    "confidence": 0.82
+                }
+            ],
+            "human_review_required": []
+        }))
+    }
+
+    async fn generate_text(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _max_tokens: u32,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+    }
+}
+
+struct CanonTimelineGraphProvider;
+
+#[async_trait]
+impl ModelClient for CanonTimelineGraphProvider {
+    async fn generate_json(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _json_schema: &Value,
+        _max_tokens: u32,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "chapter_summary": "林白在旧车站发现怀表线索。",
+            "character_state_updates": [],
+            "timeline_events": [
+                {
+                    "event_time_label": "第一夜",
+                    "sequence_hint": 1,
+                    "event_summary": "林白在旧车站发现怀表线索。",
+                    "involved_characters": ["林白"],
+                    "involved_locations": ["旧车站"],
+                    "consequences": ["旧案重新打开"],
+                    "confidence": 0.9
+                }
+            ],
+            "new_lore": [],
+            "foreshadowing_updates": [],
+            "vector_documents": [],
+            "knowledge_graph_edges": [],
+            "human_review_required": []
+        }))
+    }
+
+    async fn generate_text(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+        _max_tokens: u32,
+    ) -> Result<String, String> {
+        Ok(String::new())
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+    }
+}
+
 #[tokio::test]
 async fn canon_update_persists_valid_ai_inferred_graph_edges() {
     let db = setup_db();
@@ -282,4 +376,94 @@ async fn canon_update_persists_valid_ai_inferred_graph_edges() {
     assert_eq!(edges[0].edge_type, "investigates_at");
     assert!(edges[0].auto_inferred);
     assert!((edges[0].confidence - 0.72).abs() < 0.000001);
+}
+
+#[tokio::test]
+async fn canon_update_resolves_graph_edges_from_unique_node_labels() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    seed_nodes(&db, &project_id);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, sequence, title, status, word_count)
+             VALUES ('chapter-label-edge', ?1, 1, '旧车站回访', 'draft', 1200)",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::workflow::canon_updater::update_canon_after_chapter(
+        &db,
+        &CanonGraphLabelEdgeProvider,
+        &project_id,
+        "chapter-label-edge",
+        &json!({
+            "title": "旧车站回访",
+            "body_markdown": "林白在旧车站调查雨夜案。",
+            "summary": "发现旧车站线索。",
+            "major_events": []
+        }),
+    )
+    .await
+    .unwrap();
+
+    let edges = tauri_app_lib::db::knowledge_graph::get_edges(&db, &project_id).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].source_node_id, "char-a");
+    assert_eq!(edges[0].target_node_id, "loc-a");
+    assert_eq!(edges[0].edge_type, "investigates_at");
+    assert!((edges[0].confidence - 0.82).abs() < 0.000001);
+}
+
+#[tokio::test]
+async fn canon_update_creates_deterministic_edges_from_timeline_events() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    seed_nodes(&db, &project_id);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, sequence, title, status, word_count)
+             VALUES ('chapter-timeline-edge', ?1, 1, '旧车站回访', 'draft', 1200)",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::workflow::canon_updater::update_canon_after_chapter(
+        &db,
+        &CanonTimelineGraphProvider,
+        &project_id,
+        "chapter-timeline-edge",
+        &json!({
+            "title": "旧车站回访",
+            "body_markdown": "林白在旧车站发现怀表线索。",
+            "summary": "发现怀表线索。",
+            "major_events": []
+        }),
+    )
+    .await
+    .unwrap();
+
+    let snapshot = tauri_app_lib::db::knowledge_graph::get_snapshot(&db, &project_id).unwrap();
+    let timeline = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.node_type == "timeline_event" && node.label.contains("怀表线索"))
+        .expect("timeline event node should exist");
+    assert!(snapshot.edges.iter().any(|edge| {
+        edge.source_node_id == "char-a"
+            && edge.source_node_type == "character"
+            && edge.target_node_id == timeline.id
+            && edge.target_node_type == "timeline_event"
+            && edge.edge_type == "participates_in"
+    }));
+    assert!(snapshot.edges.iter().any(|edge| {
+        edge.source_node_id == timeline.id
+            && edge.source_node_type == "timeline_event"
+            && edge.target_node_id == "loc-a"
+            && edge.target_node_type == "location"
+            && edge.edge_type == "occurs_at"
+    }));
 }

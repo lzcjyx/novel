@@ -3,6 +3,7 @@ pub mod canon_consistency;
 pub mod canon_updater;
 pub mod chapter_production;
 pub mod learning;
+pub mod learning_intake;
 pub mod lock;
 pub mod novel_bootstrap;
 pub mod prompt_rendering;

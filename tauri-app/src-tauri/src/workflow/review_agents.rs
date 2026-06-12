@@ -226,6 +226,65 @@ fn serialize_precheck_issues(issues: &[CanonConsistencyIssue]) -> String {
     .to_string()
 }
 
+fn preview_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
+}
+
+fn extract_review_json(raw: &str) -> Result<serde_json::Value, String> {
+    let trimmed = raw.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return Ok(value);
+    }
+
+    let cleaned = trimmed
+        .trim_start_matches("```json")
+        .trim_start_matches("```JSON")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if cleaned != trimmed {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(cleaned) {
+            return Ok(value);
+        }
+    }
+
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if start <= end {
+            let candidate = &trimmed[start..=end];
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+                return Ok(value);
+            }
+        }
+    }
+
+    Err(format!(
+        "Could not parse reviewer JSON. Raw preview: {}",
+        preview_chars(trimmed, 300)
+    ))
+}
+
+fn extract_score(output: &serde_json::Value) -> Result<i32, String> {
+    let score = output
+        .get("score")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "Reviewer JSON missing numeric score".to_string())?;
+    if !score.is_finite() || !(0.0..=100.0).contains(&score) {
+        return Err(format!("Reviewer score out of 0-100 range: {}", score));
+    }
+    Ok(score.round() as i32)
+}
+
+fn json_field_or_empty(output: &serde_json::Value, keys: &[&str]) -> String {
+    for key in keys {
+        if let Some(value) = output.get(*key) {
+            if !value.is_null() {
+                return value.to_string();
+            }
+        }
+    }
+    "[]".to_string()
+}
+
 async fn run_single_review(
     provider: &dyn ModelClient,
     agent_name: &str,
@@ -305,34 +364,21 @@ async fn run_single_review(
         .await?;
 
     // Extract JSON from the response
-    let output: serde_json::Value = {
-        let raw = raw.trim();
-        if let Ok(v) = serde_json::from_str(raw) {
-            v
-        } else {
-            let cleaned = raw
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
-            serde_json::from_str(cleaned).unwrap_or_else(|_| {
-                serde_json::json!({"score": 0, "pass": false, "blocking_issues": [], "minor_issues": [], "recommendations": []})
-            })
-        }
-    };
+    let output = extract_review_json(&raw)?;
 
-    let score = output["score"].as_i64().unwrap_or(0) as i32;
+    let score = extract_score(&output)?;
     let pass = output["pass"].as_bool().unwrap_or(false);
-    let blocking = output["blocking_issues"].to_string();
-    let minor = output["minor_issues"].to_string();
-    let recommendations = output["recommendations"].to_string();
+    let blocking = json_field_or_empty(&output, &["blocking_issues"]);
+    let minor = json_field_or_empty(&output, &["minor_issues"]);
+    let recommendations =
+        json_field_or_empty(&output, &["recommendations", "global_recommendations"]);
 
     if score < 20 {
         eprintln!(
             "[WARN] {} returned score={}, raw first 300 chars: {}",
             agent_name,
             score,
-            &raw[..raw.len().min(300)]
+            preview_chars(&raw, 300)
         );
     }
 

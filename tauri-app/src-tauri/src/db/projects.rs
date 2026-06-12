@@ -1,10 +1,27 @@
-use rusqlite::params;
 use crate::db::connection::Database;
 use crate::models::{Project, ProjectStats};
+use rusqlite::params;
+use serde_json::{json, Value};
 
-pub fn create_project(db: &Database, name: &str, description: Option<&str>, genre: Option<&str>,
-    sub_genre: Option<&str>, target_audience: Option<&str>, tone: Option<&str>,
-    style_profile_desc: Option<&str>, total_target_words: Option<u32>, daily_target_words: Option<u32>,
+fn normalize_metadata(raw: &str) -> Value {
+    let mut metadata = serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!({}));
+    if !metadata.is_object() {
+        metadata = json!({});
+    }
+    metadata
+}
+
+pub fn create_project(
+    db: &Database,
+    name: &str,
+    description: Option<&str>,
+    genre: Option<&str>,
+    sub_genre: Option<&str>,
+    target_audience: Option<&str>,
+    tone: Option<&str>,
+    style_profile_desc: Option<&str>,
+    total_target_words: Option<u32>,
+    daily_target_words: Option<u32>,
 ) -> Result<Project, String> {
     let id = Database::new_uuid();
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
@@ -65,17 +82,28 @@ pub fn list_projects(db: &Database) -> Result<Vec<Project>, String> {
          FROM projects ORDER BY created_at DESC"
     ).map_err(|e| format!("Prepare: {}", e))?;
 
-    let projects = stmt.query_map([], |row| {
-        Ok(Project {
-            id: row.get(0)?, name: row.get(1)?, genre: row.get(2)?, target_audience: row.get(3)?,
-            style_profile: row.get(4)?, total_target_words: row.get(5)?, daily_target_words: row.get(6)?,
-            auto_publish: row.get::<_, i32>(7)? != 0, quality_threshold: row.get(8)?,
-            blog_provider: row.get(9)?, status: row.get(10)?, metadata: row.get(11)?,
-            created_at: row.get(12)?, updated_at: row.get(13)?,
+    let projects = stmt
+        .query_map([], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                genre: row.get(2)?,
+                target_audience: row.get(3)?,
+                style_profile: row.get(4)?,
+                total_target_words: row.get(5)?,
+                daily_target_words: row.get(6)?,
+                auto_publish: row.get::<_, i32>(7)? != 0,
+                quality_threshold: row.get(8)?,
+                blog_provider: row.get(9)?,
+                status: row.get(10)?,
+                metadata: row.get(11)?,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
+            })
         })
-    }).map_err(|e| format!("Query: {}", e))?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|e| format!("Collect: {}", e))?;
+        .map_err(|e| format!("Query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect: {}", e))?;
 
     Ok(projects)
 }
@@ -85,15 +113,21 @@ pub fn get_project_stats(db: &Database, id: &str) -> Result<ProjectStats, String
     let slug = slugify(&proj.id);
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
 
-    let chapter_count: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM chapters WHERE project_id = ?1", params![id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let chapter_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chapters WHERE project_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
-    let total_words: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(word_count), 0) FROM chapters WHERE project_id = ?1", params![id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let total_words: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(word_count), 0) FROM chapters WHERE project_id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     let plans_left: i32 = conn.query_row(
         "SELECT COUNT(*) FROM chapter_plans WHERE project_id = ?1 AND status IN ('planned','in_progress')",
@@ -101,17 +135,28 @@ pub fn get_project_stats(db: &Database, id: &str) -> Result<ProjectStats, String
     ).unwrap_or(0);
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let chapters_today: i32 = conn.query_row(
-        "SELECT COUNT(*) FROM chapters WHERE project_id = ?1 AND date(created_at) = ?2",
-        params![id, today], |r| r.get(0),
-    ).unwrap_or(0);
+    let chapters_today: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chapters WHERE project_id = ?1 AND date(created_at) = ?2",
+            params![id, today],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
 
     drop(conn);
 
     Ok(ProjectStats {
-        id: proj.id, name: proj.name, slug, genre: proj.genre, status: proj.status,
-        target_words: proj.total_target_words, chapter_count, total_words, plans_left,
-        chapters_today, created_at: proj.created_at,
+        id: proj.id,
+        name: proj.name,
+        slug,
+        genre: proj.genre,
+        status: proj.status,
+        target_words: proj.total_target_words,
+        chapter_count,
+        total_words,
+        plans_left,
+        chapters_today,
+        created_at: proj.created_at,
     })
 }
 
@@ -121,6 +166,65 @@ pub fn delete_project(db: &Database, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| format!("Delete project: {}", e))?;
     Ok(())
+}
+
+pub fn set_project_paper_dir(
+    db: &Database,
+    project_id: &str,
+    paper_dir: &str,
+) -> Result<(), String> {
+    let project = get_project(db, project_id)?;
+    let mut metadata = normalize_metadata(&project.metadata);
+    metadata["paper_dir"] = json!(paper_dir);
+    let metadata_json =
+        serde_json::to_string(&metadata).map_err(|e| format!("Serialize metadata: {}", e))?;
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    conn.execute(
+        "UPDATE projects SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![metadata_json, project_id],
+    )
+    .map_err(|e| format!("Set project paper dir: {}", e))?;
+    Ok(())
+}
+
+pub fn get_project_paper_dir(
+    db: &Database,
+    project_id: &str,
+    fallback_data_dir: &str,
+) -> Result<String, String> {
+    let project = get_project(db, project_id)?;
+    let metadata = normalize_metadata(&project.metadata);
+    let persisted = metadata
+        .get("paper_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty());
+    Ok(persisted
+        .map(str::to_string)
+        .unwrap_or_else(|| paper_dir(fallback_data_dir, project_id)))
+}
+
+pub fn project_paper_dirs_for_cleanup(
+    db: &Database,
+    project_id: &str,
+    fallback_data_dir: &str,
+) -> Result<Vec<String>, String> {
+    let project = get_project(db, project_id)?;
+    let metadata = normalize_metadata(&project.metadata);
+    let fallback = paper_dir(fallback_data_dir, project_id);
+    let mut dirs = Vec::new();
+    if let Some(persisted) = metadata
+        .get("paper_dir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|dir| !dir.is_empty())
+    {
+        dirs.push(persisted.to_string());
+    }
+    if !dirs.iter().any(|dir| dir == &fallback) {
+        dirs.push(fallback);
+    }
+    Ok(dirs)
 }
 
 pub fn get_active_project(db: &Database) -> Result<Option<Project>, String> {

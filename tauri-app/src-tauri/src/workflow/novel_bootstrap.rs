@@ -46,6 +46,8 @@ pub async fn bootstrap_novel(
     let slug = projects::slugify(&project.id);
     let dir = format!("{}/{}", settings.data_dir, slug);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Mkdir: {}", e))?;
+    projects::set_project_paper_dir(db, &project.id, &dir)?;
+    let project = projects::get_project(db, &project.id)?;
     log(log_tx, &format!("Paper directory: {}", dir));
 
     // 3. Build bible prompt
@@ -58,6 +60,8 @@ pub async fn bootstrap_novel(
         "target_audience": input.target_audience,
         "tone": input.tone,
         "style_description": input.style_profile_desc,
+        "target_total_words": input.target_total_words,
+        "daily_target_words": input.daily_target_words,
     });
     let vars = HashMap::from([(
         "PROJECT_INPUT_JSON",

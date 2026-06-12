@@ -255,8 +255,7 @@ fn stale_running_jobs_are_marked_failed_on_recovery() {
     let job_id =
         tauri_app_lib::db::generation_jobs::create_generation_job(&db, &project_id, "plan-stale")
             .unwrap();
-    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None)
-        .unwrap();
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
 
     {
         let conn = db.conn.lock().unwrap();
@@ -300,8 +299,7 @@ fn fresh_running_jobs_are_not_recovered_as_stale() {
     let job_id =
         tauri_app_lib::db::generation_jobs::create_generation_job(&db, &project_id, "plan-fresh")
             .unwrap();
-    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None)
-        .unwrap();
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
 
     let recovered = tauri_app_lib::db::generation_jobs::recover_stale_running_jobs(
         &db,
@@ -314,6 +312,24 @@ fn fresh_running_jobs_are_not_recovered_as_stale() {
     let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
     assert_eq!(jobs[0].status, "reviewing");
     assert_eq!(jobs[0].error_message, None);
+}
+
+#[test]
+fn project_running_state_includes_active_sqlite_jobs() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    insert_plan(&db, &project_id, "plan-status");
+    let job_id =
+        tauri_app_lib::db::generation_jobs::create_generation_job(&db, &project_id, "plan-status")
+            .unwrap();
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
+
+    assert!(tauri_app_lib::project_is_running(&db, false, &project_id).unwrap());
+
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "completed", None).unwrap();
+
+    assert!(!tauri_app_lib::project_is_running(&db, false, &project_id).unwrap());
+    assert!(tauri_app_lib::project_is_running(&db, true, &project_id).unwrap());
 }
 
 #[test]

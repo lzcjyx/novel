@@ -34,6 +34,17 @@ fn add_log(state: &AppState, msg: &str) {
     }
 }
 
+pub fn project_is_running(
+    db: &Database,
+    memory_running: bool,
+    project_id: &str,
+) -> Result<bool, String> {
+    if memory_running {
+        return Ok(true);
+    }
+    db::generation_jobs::is_job_running(db, project_id)
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -211,12 +222,15 @@ async fn get_project(state: tauri::State<'_, AppState>, id: String) -> Result<Pr
 async fn delete_project(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     add_log(&state, &format!("Deleting project: {}", &id[..8]));
     let settings = db::settings::get_settings(&state.db)?;
-    let slug = db::projects::slugify(&id);
-    let paper_dir = format!("{}/{}", settings.data_dir, slug);
+    let cleanup_dirs =
+        db::projects::project_paper_dirs_for_cleanup(&state.db, &id, &settings.data_dir)?;
     // DB deletion (FK cascade cleans all related rows)
     db::projects::delete_project(&state.db, &id)?;
     // Clean up files on disk
-    if std::path::Path::new(&paper_dir).exists() {
+    for paper_dir in cleanup_dirs {
+        if !std::path::Path::new(&paper_dir).exists() {
+            continue;
+        }
         if let Err(e) = std::fs::remove_dir_all(&paper_dir) {
             add_log(
                 &state,
@@ -398,12 +412,9 @@ async fn rebuild_vector_index(
         ));
     }
 
-    let provider = get_provider(&state)?;
-    let emb_provider = get_embedding_provider(&state).ok();
-    let embed = emb_provider
-        .as_ref()
-        .map(|p| p.as_ref())
-        .unwrap_or(provider.as_ref());
+    let emb_provider = get_embedding_provider(&state)
+        .map_err(|e| format!("Embedding provider is not configured: {}", e))?;
+    let embed = emb_provider.as_ref();
     let contents: Vec<String> = pending
         .iter()
         .map(|candidate| candidate.content.clone())
@@ -453,20 +464,22 @@ async fn learn_from_text(
     if project_id.is_empty() {
         return Err("No project selected. Select a project first.".into());
     }
-    let stype = source_type.as_deref().unwrap_or("manual");
+    let stype = source_type.unwrap_or_else(|| "manual".into());
+    let source_title = if source_title.trim().is_empty() {
+        "User Input".into()
+    } else {
+        source_title
+    };
     let provider = get_provider(&state)?;
-    let entries =
-        workflow::learning::extract_knowledge(provider.as_ref(), &text, &source_title, stype, None)
-            .await?;
-    let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    for entry in &entries {
-        let id = Database::new_uuid();
-        conn.execute(
-            "INSERT OR IGNORE INTO learning_entries (id, project_id, source_type, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            rusqlite::params![id, project_id, stype, source_title, entry.category, entry.pattern_name, entry.pattern_description, entry.example_text, entry.application_notes, entry.confidence],
-        ).map_err(|e| format!("Insert learning: {}", e))?;
-    }
+    let entries = workflow::learning::extract_knowledge(
+        provider.as_ref(),
+        &text,
+        &source_title,
+        &stype,
+        None,
+    )
+    .await?;
+    persist_learning_entries(&state.db, &project_id, &entries)?;
     add_log(
         &state,
         &format!("Learned {} patterns from '{}'", entries.len(), source_title),
@@ -475,25 +488,147 @@ async fn learn_from_text(
 }
 
 #[tauri::command]
+async fn learn_from_file_text(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    file_name: String,
+    byte_len: usize,
+    text: String,
+    source_title: Option<String>,
+) -> Result<Vec<LearningEntry>, String> {
+    if project_id.is_empty() {
+        return Err("No project selected. Select a project first.".into());
+    }
+
+    let validated =
+        workflow::learning_intake::validate_user_file_text(&file_name, byte_len, &text)?;
+    let title = source_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&validated.source_title)
+        .to_string();
+    let provider = get_provider(&state)?;
+    let entries = workflow::learning::extract_knowledge(
+        provider.as_ref(),
+        &validated.text,
+        &title,
+        "manual_file",
+        None,
+    )
+    .await?;
+    persist_learning_entries(&state.db, &project_id, &entries)?;
+    add_log(
+        &state,
+        &format!("Learned {} patterns from file '{}'", entries.len(), title),
+    );
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn learn_from_url(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    url: String,
+) -> Result<Vec<LearningEntry>, String> {
+    if project_id.is_empty() {
+        return Err("No project selected. Select a project first.".into());
+    }
+
+    let normalized_url = workflow::learning_intake::normalize_learning_url(&url)?;
+    let html = fetch_url_text(normalized_url.clone()).await?;
+    let text = workflow::learning_intake::extract_meaningful_text_from_html(&html)?;
+    let source_title = workflow::learning_intake::extract_source_title(&normalized_url, &html);
+    let provider = get_provider(&state)?;
+    let entries = workflow::learning::extract_knowledge(
+        provider.as_ref(),
+        &text,
+        &source_title,
+        "web",
+        Some(&normalized_url),
+    )
+    .await?;
+    persist_learning_entries(&state.db, &project_id, &entries)?;
+    add_log(
+        &state,
+        &format!(
+            "Learned {} patterns from web source '{}'",
+            entries.len(),
+            source_title
+        ),
+    );
+    Ok(entries)
+}
+
+fn persist_learning_entries(
+    db: &Database,
+    project_id: &str,
+    entries: &[LearningEntry],
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    for entry in entries {
+        let id = Database::new_uuid();
+        conn.execute(
+            "INSERT OR IGNORE INTO learning_entries (id, project_id, source_type, source_url, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                id,
+                project_id,
+                entry.source_type,
+                entry.source_url.as_deref(),
+                entry.source_title.as_deref(),
+                entry.category,
+                entry.pattern_name,
+                entry.pattern_description,
+                entry.example_text.as_deref(),
+                entry.application_notes.as_deref(),
+                entry.confidence
+            ],
+        ).map_err(|e| format!("Insert learning: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn fetch_url_text(url: String) -> Result<String, String> {
+    let normalized_url = workflow::learning_intake::normalize_learning_url(&url)?;
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(25))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| format!("Client: {}", e))?;
     let resp = client
-        .get(&url)
-        .header("User-Agent", "Mozilla/5.0 (compatible; NovelBot/1.0)")
+        .get(&normalized_url)
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (compatible; AI-Novel-Factory/0.1)",
+        )
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+        )
+        .header(
+            "Range",
+            format!(
+                "bytes=0-{}",
+                workflow::learning_intake::MAX_SOURCE_BYTES.saturating_sub(1)
+            ),
+        )
         .send()
         .await
         .map_err(|e| format!("Fetch: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
     if let Some(len) = resp.content_length() {
-        if len > 5_000_000 {
-            return Err("Page too large".into());
+        if len > workflow::learning_intake::MAX_SOURCE_BYTES as u64 {
+            return Err("Page too large (>1 MiB).".into());
         }
     }
     let html = resp.text().await.map_err(|e| format!("Read: {}", e))?;
-    if html.len() > 1_000_000 {
-        return Err("Page too large".into());
+    if html.len() > workflow::learning_intake::MAX_SOURCE_BYTES {
+        return Err("Page too large (>1 MiB).".into());
     }
     Ok(html)
 }
@@ -775,7 +910,7 @@ async fn read_chapter_file(
     filename: String,
 ) -> Result<String, String> {
     let settings = db::settings::get_settings(&state.db)?;
-    db::chapters::read_chapter_file_content(&settings.data_dir, &project_id, &filename)
+    db::chapters::read_chapter_file_content(&state.db, &settings.data_dir, &project_id, &filename)
 }
 
 // ============================================================================
@@ -1169,6 +1304,7 @@ async fn get_status(
     state: tauri::State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<StatusResponse, String> {
+    let memory_running = *state.running.lock().unwrap();
     let id = match project_id {
         Some(ref id) if !id.is_empty() => id.clone(),
         _ => match db::projects::get_active_project(&state.db)? {
@@ -1182,12 +1318,14 @@ async fn get_status(
                     chapters_today: None,
                     plans_left: None,
                     total_words: None,
-                    is_running: *state.running.lock().unwrap(),
+                    is_running: memory_running,
                     daily_schedule: None,
                 })
             }
         },
     };
+
+    let is_running = project_is_running(&state.db, memory_running, &id).unwrap_or(memory_running);
 
     if let Ok(stats) = db::projects::get_project_stats(&state.db, &id) {
         let project = db::projects::get_project(&state.db, &id).ok();
@@ -1202,7 +1340,7 @@ async fn get_status(
             chapters_today: Some(stats.chapters_today),
             plans_left: Some(stats.plans_left),
             total_words: Some(stats.total_words),
-            is_running: *state.running.lock().unwrap(),
+            is_running,
             daily_schedule: None,
         })
     } else {
@@ -1214,7 +1352,7 @@ async fn get_status(
             chapters_today: None,
             plans_left: None,
             total_words: None,
-            is_running: *state.running.lock().unwrap(),
+            is_running,
             daily_schedule: None,
         })
     }
@@ -1364,6 +1502,8 @@ pub fn run() {
             update_chapter_plan,
             update_bible_entry,
             learn_from_text,
+            learn_from_file_text,
+            learn_from_url,
             get_learning_entries,
             fetch_url_text,
             delete_learning_entry,

@@ -25,6 +25,11 @@ canon:
 recent_summaries:
 {{RECENT_SUMMARIES_JSON}}
 
+RAG/vector context availability:
+- If RAG is disabled, vector search is unavailable, or retrieval returns 0 docs, do not treat that as a story continuity defect.
+- Missing RAG evidence is infrastructure context, not a blocking issue.
+- Judge continuity only from the provided writing_brief, chapter, canon, recent_summaries, character states, timeline, and explicit chapter evidence.
+
 检查方法：
 - 地点转换：若角色上一章在A地本章在B地，检查是否经过合理时间/交通方式。不合理移动标记为blocking。
 - 道具追踪：若前文章节描述了重要物品，本章是否仍在角色手中。无故消失标记为blocking。

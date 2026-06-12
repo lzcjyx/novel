@@ -1,6 +1,7 @@
 use crate::ai::client::ModelClient;
 use crate::db::connection::Database;
 use crate::models::*;
+use crate::workflow::learning_intake;
 
 pub async fn extract_knowledge(
     provider: &dyn ModelClient,
@@ -18,7 +19,7 @@ pub async fn extract_knowledge(
 
     let user = format!(
         "分析以下文本，提取写作技巧：\n\n{}",
-        &text[..text.len().min(4000)]
+        learning_intake::truncate_chars(text, 4000)
     );
 
     let schema = serde_json::json!({
@@ -91,7 +92,7 @@ pub async fn reflect_on_chapter(
     let user = format!(
         "章节标题：{}\n\n章节内容：\n{}\n\n审稿评分：\n{}",
         chapter_title,
-        &chapter_body[..chapter_body.len().min(5000)],
+        learning_intake::truncate_chars(chapter_body, 5000),
         review_scores
     );
 
