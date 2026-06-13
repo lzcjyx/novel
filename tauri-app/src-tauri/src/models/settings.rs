@@ -20,6 +20,11 @@ pub struct AppSettings {
     pub blog_username: Option<String>,
     pub input_cost_per_million: Option<f64>,
     pub output_cost_per_million: Option<f64>,
+    pub draft_model_profile_id: Option<String>,
+    pub review_model_profile_id: Option<String>,
+    pub repair_model_profile_id: Option<String>,
+    pub embedding_model_profile_id: Option<String>,
+    pub summarization_model_profile_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -47,6 +52,11 @@ impl Default for AppSettings {
             blog_username: None,
             input_cost_per_million: None,
             output_cost_per_million: None,
+            draft_model_profile_id: None,
+            review_model_profile_id: None,
+            repair_model_profile_id: None,
+            embedding_model_profile_id: None,
+            summarization_model_profile_id: None,
         }
     }
 }

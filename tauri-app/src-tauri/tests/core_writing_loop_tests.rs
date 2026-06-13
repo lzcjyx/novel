@@ -517,10 +517,12 @@ impl ModelClient for CapturingProvider {
 
     async fn generate_text(
         &self,
-        _system: &str,
-        _user: &str,
+        system: &str,
+        user: &str,
         _max_tokens: u32,
     ) -> Result<String, String> {
+        self.systems.lock().unwrap().push(system.to_string());
+        self.users.lock().unwrap().push(user.to_string());
         if let Some(text) = &self.review_text {
             return Ok(text.clone());
         }
@@ -757,6 +759,46 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     let mut settings = tauri_app_lib::db::settings::get_settings(&db).unwrap();
     settings.input_cost_per_million = Some(1.5);
     settings.output_cost_per_million = Some(6.0);
+    let draft_profile_id = tauri_app_lib::db::model_profiles::upsert_model_profile(
+        &db,
+        &tauri_app_lib::db::model_profiles::ModelProfileInput {
+            id: Some("profile-draft-paid".to_string()),
+            name: "Paid Draft Profile".to_string(),
+            provider: "openai_compat".to_string(),
+            base_url: "http://localhost:11434/v1".to_string(),
+            model: "draft-profile-model".to_string(),
+            context_window: 128000,
+            supports_json: true,
+            supports_streaming: true,
+            supports_embeddings: false,
+            input_cost_per_million: Some(9.0),
+            output_cost_per_million: Some(12.0),
+            intended_use: "draft".to_string(),
+            metadata: serde_json::json!({"fixture": "core-loop"}),
+        },
+    )
+    .unwrap();
+    let review_profile_id = tauri_app_lib::db::model_profiles::upsert_model_profile(
+        &db,
+        &tauri_app_lib::db::model_profiles::ModelProfileInput {
+            id: Some("profile-review-paid".to_string()),
+            name: "Paid Review Profile".to_string(),
+            provider: "openai_compat".to_string(),
+            base_url: "http://localhost:11434/v1".to_string(),
+            model: "review-profile-model".to_string(),
+            context_window: 64000,
+            supports_json: true,
+            supports_streaming: true,
+            supports_embeddings: false,
+            input_cost_per_million: Some(3.0),
+            output_cost_per_million: Some(4.0),
+            intended_use: "review".to_string(),
+            metadata: serde_json::json!({"fixture": "core-loop"}),
+        },
+    )
+    .unwrap();
+    settings.draft_model_profile_id = Some(draft_profile_id.clone());
+    settings.review_model_profile_id = Some(review_profile_id.clone());
     tauri_app_lib::db::settings::save_settings(&db, &settings).unwrap();
 
     let provider = CapturingProvider {
@@ -817,6 +859,24 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     assert_eq!(
         version_metadata["selected_learning_entries"][0]["pattern_name"].as_str(),
         Some("克制悬疑")
+    );
+    assert_eq!(
+        version_metadata["prompt_runtime"]["prompt_name"].as_str(),
+        Some("draft_writer")
+    );
+    assert_eq!(
+        version_metadata["prompt_runtime"]["generation_phase"].as_str(),
+        Some("draft")
+    );
+    assert_eq!(
+        version_metadata["prompt_runtime"]["unit_traces"][0]["identifier"].as_str(),
+        Some("draft_writer.system")
+    );
+    assert!(
+        version_metadata["prompt_runtime"]["token_estimate"]
+            .as_i64()
+            .unwrap_or(0)
+            > 0
     );
     assert!(
         version_metadata["learning_context_hash"]
@@ -910,12 +970,39 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
         .find(|event| event["phase"].as_str() == Some("generate_draft"))
         .expect("draft usage should be recorded");
     assert_eq!(draft_usage["usage_source"].as_str(), Some("provider"));
+    assert_eq!(
+        draft_usage["model_profile"]["id"].as_str(),
+        Some(draft_profile_id.as_str())
+    );
+    assert_eq!(
+        draft_usage["model_profile"]["name"].as_str(),
+        Some("Paid Draft Profile")
+    );
+    assert_eq!(draft_usage["provider"].as_str(), Some("openai_compat"));
+    assert_eq!(draft_usage["model"].as_str(), Some("draft-profile-model"));
     assert_eq!(draft_usage["prompt_tokens"].as_i64(), Some(1111));
     assert_eq!(draft_usage["completion_tokens"].as_i64(), Some(222));
     assert_eq!(draft_usage["total_tokens"].as_i64(), Some(1333));
-    assert_eq!(draft_usage["input_cost_per_million"].as_f64(), Some(1.5));
-    assert_eq!(draft_usage["output_cost_per_million"].as_f64(), Some(6.0));
-    assert!((draft_usage["estimated_cost_usd"].as_f64().unwrap() - 0.0029985).abs() < 0.000001);
+    assert_eq!(draft_usage["input_cost_per_million"].as_f64(), Some(9.0));
+    assert_eq!(draft_usage["output_cost_per_million"].as_f64(), Some(12.0));
+    assert!((draft_usage["estimated_cost_usd"].as_f64().unwrap() - 0.012663).abs() < 0.000001);
+    let review_usage = usage_events
+        .iter()
+        .find(|event| event["phase"].as_str() == Some("review_agents"))
+        .expect("review usage should be recorded");
+    assert_eq!(review_usage["usage_source"].as_str(), Some("estimated"));
+    assert_eq!(
+        review_usage["model_profile"]["id"].as_str(),
+        Some(review_profile_id.as_str())
+    );
+    assert_eq!(
+        review_usage["model_profile"]["name"].as_str(),
+        Some("Paid Review Profile")
+    );
+    assert_eq!(review_usage["provider"].as_str(), Some("openai_compat"));
+    assert_eq!(review_usage["model"].as_str(), Some("review-profile-model"));
+    assert_eq!(review_usage["input_cost_per_million"].as_f64(), Some(3.0));
+    assert_eq!(review_usage["output_cost_per_million"].as_f64(), Some(4.0));
     assert_eq!(
         job_metadata["usage_summary"]["provider_reported_call_count"].as_u64(),
         Some(1)
@@ -1137,6 +1224,196 @@ async fn chapter_pipeline_does_not_use_main_provider_for_rag_when_embeddings_are
         }
     }
     assert!(retrieve_detail.contains("RAG disabled"));
+}
+
+#[tokio::test]
+async fn chapter_pipeline_routes_draft_review_and_repair_to_stage_providers() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+             VALUES ('plan-stage-providers', ?1, 1, '阶段 Provider', '触发修订以验证 provider 路由', 3000, 'planned')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+    let mut settings = tauri_app_lib::db::settings::get_settings(&db).unwrap();
+    settings.max_revise_count = 1;
+    tauri_app_lib::db::settings::save_settings(&db, &settings).unwrap();
+
+    let draft_provider = CapturingProvider::default();
+    let review_provider = CapturingProvider {
+        review_text: Some(
+            r#"{"score":40,"pass":true,"blocking_issues":[],"minor_issues":[{"issue":"needs repair"}],"recommendations":["revise"]}"#
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+    let repair_provider = CapturingProvider::default();
+    let (log_tx, _log_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+
+    let result =
+        tauri_app_lib::workflow::chapter_production::generate_next_chapter_with_stage_providers(
+            &db,
+            tauri_app_lib::workflow::chapter_production::ChapterPipelineProviders {
+                draft: &draft_provider,
+                review: &review_provider,
+                repair: &repair_provider,
+                postprocess: &draft_provider,
+            },
+            None,
+            &project_id,
+            true,
+            &log_tx,
+            &event_tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(result.ok);
+    assert!(!draft_provider.systems.lock().unwrap().is_empty());
+    assert!(review_provider
+        .users
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|prompt| prompt.contains("请评审以下章节内容")));
+    assert!(repair_provider
+        .systems
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|prompt| prompt.contains("资深中文网文修订编辑")));
+    assert!(repair_provider
+        .users
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|prompt| prompt.contains("needs repair")));
+}
+
+#[tokio::test]
+async fn chapter_pipeline_runs_context_extension_hooks_and_persists_trace() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapter_plans (id, project_id, sequence, title, outline, target_word_count, status)
+             VALUES ('plan-extension-hooks', ?1, 1, '扩展 Hook', '验证 context hook trace', 3000, 'planned')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+    tauri_app_lib::extensions::host::import_extension_package(
+        &db,
+        &tauri_app_lib::extensions::host::ExtensionPackage {
+            manifest: tauri_app_lib::extensions::manifest::ExtensionManifest {
+                id: "pipeline.context.trace".to_string(),
+                name: "Pipeline Context Trace".to_string(),
+                version: "1.0.0".to_string(),
+                description: Some("trace pipeline context hooks".to_string()),
+                enabled_by_default: false,
+                permissions: vec!["project_read".to_string()],
+                hooks: vec![
+                    "before_context_build".to_string(),
+                    "after_context_build".to_string(),
+                    "before_review".to_string(),
+                    "after_review".to_string(),
+                    "export_target".to_string(),
+                ],
+                package_kinds: vec!["context_rule_pack".to_string()],
+                metadata: serde_json::json!({}),
+            },
+            enabled: true,
+            contributions: vec![
+                tauri_app_lib::extensions::host::ExtensionContribution {
+                    hook: "before_context_build".to_string(),
+                    required_permission: Some("project_read".to_string()),
+                    metadata_patch: serde_json::json!({"before_context_extension": true}),
+                },
+                tauri_app_lib::extensions::host::ExtensionContribution {
+                    hook: "after_context_build".to_string(),
+                    required_permission: Some("project_read".to_string()),
+                    metadata_patch: serde_json::json!({"after_context_extension": true}),
+                },
+                tauri_app_lib::extensions::host::ExtensionContribution {
+                    hook: "before_review".to_string(),
+                    required_permission: Some("project_read".to_string()),
+                    metadata_patch: serde_json::json!({"before_review_extension": true}),
+                },
+                tauri_app_lib::extensions::host::ExtensionContribution {
+                    hook: "after_review".to_string(),
+                    required_permission: Some("project_read".to_string()),
+                    metadata_patch: serde_json::json!({"after_review_extension": true}),
+                },
+                tauri_app_lib::extensions::host::ExtensionContribution {
+                    hook: "export_target".to_string(),
+                    required_permission: Some("project_read".to_string()),
+                    metadata_patch: serde_json::json!({"export_extension": true}),
+                },
+            ],
+        },
+    )
+    .unwrap();
+    tauri_app_lib::extensions::host::set_extension_enabled(&db, "pipeline.context.trace", true)
+        .unwrap();
+
+    let provider = CapturingProvider::default();
+    let (log_tx, _log_rx) = tokio::sync::mpsc::channel(100);
+    let (event_tx, _event_rx) = tokio::sync::mpsc::channel(100);
+
+    let result = tauri_app_lib::workflow::chapter_production::generate_next_chapter(
+        &db,
+        &provider,
+        None,
+        &project_id,
+        true,
+        &log_tx,
+        &event_tx,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert!(result.ok);
+    let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&jobs[0].metadata).unwrap();
+    let hooks = metadata["extension_hooks"].as_array().unwrap();
+    let hook_names = hooks
+        .iter()
+        .filter_map(|hook| hook["hook"].as_str())
+        .collect::<Vec<_>>();
+    assert!(hook_names.contains(&"before_context_build"));
+    assert!(hook_names.contains(&"after_context_build"));
+    assert!(hook_names.contains(&"before_review"));
+    assert!(hook_names.contains(&"after_review"));
+    assert!(hook_names.contains(&"export_target"));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "before_context_build"
+            && hook["events"][0]["extension_id"] == "pipeline.context.trace"
+            && hook["workflow_metadata"]["before_context_extension"] == true
+    }));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "after_context_build"
+            && hook["events"][0]["status"] == "applied"
+            && hook["workflow_metadata"]["after_context_extension"] == true
+    }));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "before_review"
+            && hook["workflow_metadata"]["before_review_extension"] == true
+    }));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "after_review"
+            && hook["workflow_metadata"]["after_review_extension"] == true
+    }));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "export_target" && hook["workflow_metadata"]["export_extension"] == true
+    }));
 }
 
 #[tokio::test]

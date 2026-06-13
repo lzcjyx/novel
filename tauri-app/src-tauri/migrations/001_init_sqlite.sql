@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS chapter_versions (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     version_number INTEGER NOT NULL,
     version_type TEXT NOT NULL DEFAULT 'draft'
-        CHECK (version_type IN ('draft','revised','final')),
+        CHECK (version_type IN ('draft','revised','final','accepted_candidate')),
     title TEXT,
     body_markdown TEXT,
     summary TEXT,
@@ -433,7 +433,7 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     chapter_plan_id TEXT NOT NULL REFERENCES chapter_plans(id) ON DELETE CASCADE,
     job_date TEXT NOT NULL DEFAULT (date('now')),
     status TEXT NOT NULL DEFAULT 'started'
-        CHECK (status IN ('started','draft_created','reviewing','revising','publishing','completed','failed','needs_human_review','skipped')),
+        CHECK (status IN ('started','draft_created','reviewing','revising','publishing','completed','failed','needs_human_review','skipped','cancelled')),
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
     error_message TEXT,
@@ -700,3 +700,145 @@ CREATE TABLE IF NOT EXISTS learning_entries (
 
 CREATE INDEX IF NOT EXISTS idx_learning_project ON learning_entries(project_id);
 CREATE INDEX IF NOT EXISTS idx_learning_category ON learning_entries(project_id, category);
+
+-- ============================================================================
+-- 30. prompt_presets / prompt_preset_units — operator-editable prompt runtime
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS prompt_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    scope TEXT NOT NULL DEFAULT 'project',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_presets_status ON prompt_presets(status);
+CREATE INDEX IF NOT EXISTS idx_prompt_presets_scope ON prompt_presets(scope);
+
+CREATE TABLE IF NOT EXISTS prompt_preset_units (
+    id TEXT PRIMARY KEY,
+    preset_id TEXT NOT NULL REFERENCES prompt_presets(id) ON DELETE CASCADE,
+    identifier TEXT NOT NULL,
+    role TEXT NOT NULL,
+    unit_order INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    injection_position TEXT NOT NULL DEFAULT 'main',
+    generation_phase TEXT NOT NULL DEFAULT 'all',
+    content TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(preset_id, identifier)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_units_preset ON prompt_preset_units(preset_id, unit_order);
+CREATE INDEX IF NOT EXISTS idx_prompt_units_phase ON prompt_preset_units(preset_id, generation_phase);
+
+-- ============================================================================
+-- 31. context_rules — deterministic canon activation rules
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS context_rules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    primary_keywords TEXT NOT NULL DEFAULT '[]',
+    secondary_keywords TEXT NOT NULL DEFAULT '[]',
+    entity_refs TEXT NOT NULL DEFAULT '[]',
+    chapter_ranges TEXT NOT NULL DEFAULT '[]',
+    priority INTEGER NOT NULL DEFAULT 0,
+    token_budget INTEGER NOT NULL DEFAULT 160,
+    sticky_chapters INTEGER NOT NULL DEFAULT 0,
+    cooldown_chapters INTEGER NOT NULL DEFAULT 0,
+    content TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT 'context_rule',
+    source_id TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_rules_project ON context_rules(project_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_context_rules_priority ON context_rules(project_id, priority);
+
+-- ============================================================================
+-- 32. model_profiles — provider capability and pricing profiles
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS model_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    context_window INTEGER NOT NULL DEFAULT 8192,
+    supports_json INTEGER NOT NULL DEFAULT 0,
+    supports_streaming INTEGER NOT NULL DEFAULT 0,
+    supports_embeddings INTEGER NOT NULL DEFAULT 0,
+    input_cost_per_million REAL,
+    output_cost_per_million REAL,
+    intended_use TEXT NOT NULL DEFAULT 'draft',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_profiles_provider ON model_profiles(provider, model);
+CREATE INDEX IF NOT EXISTS idx_model_profiles_use ON model_profiles(intended_use, status);
+
+-- ============================================================================
+-- 33. draft_alternatives — candidate draft exploration
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS draft_alternatives (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    chapter_plan_id TEXT NOT NULL REFERENCES chapter_plans(id) ON DELETE CASCADE,
+    candidate_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    body_markdown TEXT NOT NULL,
+    summary TEXT,
+    word_count INTEGER NOT NULL DEFAULT 0,
+    prompt_hash TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    model_profile_id TEXT,
+    review_notes TEXT NOT NULL DEFAULT '{}',
+    estimated_cost_usd REAL,
+    status TEXT NOT NULL DEFAULT 'candidate'
+        CHECK (status IN ('candidate','selected','rejected','archived')),
+    selection_reason TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(project_id, chapter_plan_id, candidate_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_draft_alternatives_plan ON draft_alternatives(project_id, chapter_plan_id, candidate_number);
+CREATE INDEX IF NOT EXISTS idx_draft_alternatives_status ON draft_alternatives(project_id, status);
+
+-- ============================================================================
+-- 34. extension_packages — declarative extension host registry
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS extension_packages (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    description TEXT,
+    manifest TEXT NOT NULL,
+    contributions TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'installed',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_packages_enabled ON extension_packages(enabled, status);

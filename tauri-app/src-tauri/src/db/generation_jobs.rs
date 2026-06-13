@@ -196,7 +196,10 @@ pub fn update_job_status(
     error_message: Option<&str>,
 ) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    let completed = if status == "completed" || status == "failed" || status == "needs_human_review"
+    let completed = if status == "completed"
+        || status == "failed"
+        || status == "needs_human_review"
+        || status == "cancelled"
     {
         Some(now_timestamp())
     } else {
@@ -372,6 +375,34 @@ pub fn record_job_model_usage_with_source(
     output_cost_per_million: Option<f64>,
     usage_source: &str,
 ) -> Result<(), String> {
+    record_job_model_usage_with_source_and_profile(
+        db,
+        job_id,
+        phase,
+        provider,
+        model,
+        prompt_tokens,
+        completion_tokens,
+        input_cost_per_million,
+        output_cost_per_million,
+        usage_source,
+        None,
+    )
+}
+
+pub fn record_job_model_usage_with_source_and_profile(
+    db: &Database,
+    job_id: &str,
+    phase: &str,
+    provider: &str,
+    model: &str,
+    prompt_tokens: i32,
+    completion_tokens: i32,
+    input_cost_per_million: Option<f64>,
+    output_cost_per_million: Option<f64>,
+    usage_source: &str,
+    model_profile: Option<Value>,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let metadata_raw: String = conn
         .query_row(
@@ -419,6 +450,7 @@ pub fn record_job_model_usage_with_source(
             "input_cost_per_million": input_cost_per_million,
             "output_cost_per_million": output_cost_per_million,
             "estimated_cost_usd": estimated_cost_usd,
+            "model_profile": model_profile,
             "timestamp": now_timestamp(),
         }));
     summarize_usage(&mut metadata);
