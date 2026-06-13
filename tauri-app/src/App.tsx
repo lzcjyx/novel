@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
+import { tauriClient } from "./lib/tauriClient";
+import { RuntimePage } from "./pages/RuntimePage";
 
 // ---- Types ----
 interface ProjectStats { id: string; name: string; slug: string; genre?: string; status: string; target_words?: number; chapter_count: number; total_words: number; plans_left: number; chapters_today: number; created_at: string; }
@@ -25,7 +27,7 @@ interface JobMetadata { phase_events?: JobPhaseEvent[]; phase_summary?: JobPhase
 interface GenerationResult { ok: boolean; message: string; chapter_id?: string; chapter_title?: string; sequence?: number; word_count?: number; final_score?: number; decision?: string; }
 interface StatusResponse { ok: boolean; novel?: { name: string; genre?: string; }; slug?: string; chapter_count?: number; chapters_today?: number; plans_left?: number; total_words?: number; is_running: boolean; }
 interface BibleData { characters: any[]; locations: any[]; organizations: any[]; items: any[]; world_lore: any[]; magic_systems: any[]; canon_rules: any[]; plot_threads: any[]; foreshadowing: any[]; style_guides: any[]; timeline_events: any[]; }
-interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; }
+interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; }
 interface Project { id: string; name: string; }
 interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; }
 type NullableNumber = number | null | undefined;
@@ -35,7 +37,11 @@ interface RetrievalTrace { source_count: number; best_similarity?: NullableNumbe
 interface GraphContextNode { id: string; node_type: string; label: string; }
 interface GraphContextNeighbor { id: string; node_type: string; label: string; edge_type: string; direction: string; depth?: number; via_id: string; via_type: string; via_label: string; description?: string; }
 interface GraphContext { seeds: GraphContextNode[]; neighbors: GraphContextNeighbor[]; source_keys: string[]; summary: string; }
-interface WritingContextPreview { project?: any; chapter_plan?: any; continuity?: any; canon?: any; graph_context?: GraphContext; retrieval?: any[]; retrieval_trace?: RetrievalTrace; style?: any; learned_patterns?: any[]; operator_controls?: OperatorControls; }
+interface ContextRuleActivation { rule_id: string; name: string; source_key: string; priority: number; token_estimate: number; content: string; matched_keywords: string[]; matched_secondary_keywords: string[]; activation_reason: string; }
+interface ContextActivationTrace { activated_rules: ContextRuleActivation[]; source_keys: string[]; }
+interface PromptUnitTrace { identifier: string; role: string; order: number; injection_position: string; generation_phase: string; token_estimate: number; }
+interface PromptRuntimePreview { prompt_name: string; generation_phase: string; system_prompt: string; user_prompt: string; token_estimate: number; unit_traces: PromptUnitTrace[]; }
+interface WritingContextPreview { project?: any; chapter_plan?: any; continuity?: any; canon?: any; graph_context?: GraphContext; context_activation?: ContextActivationTrace; retrieval?: any[]; retrieval_trace?: RetrievalTrace; style?: any; learned_patterns?: any[]; operator_controls?: OperatorControls; prompt_runtime?: PromptRuntimePreview; }
 interface KnowledgeGraphNode { id: string; node_type: string; label: string; subtitle?: string; description?: string; status: string; degree: number; }
 interface KnowledgeGraphEdge { id: string; source_node_id: string; source_node_type: string; target_node_id: string; target_node_type: string; edge_type: string; description?: string; auto_inferred: boolean; confidence: number; }
 interface KnowledgeGraphSnapshot { nodes: KnowledgeGraphNode[]; edges: KnowledgeGraphEdge[]; orphan_count: number; }
@@ -124,7 +130,7 @@ function App() {
 
   const navLabels: Record<string, string> = {
     dashboard: "Dashboard", projects: "Projects", chapters: "Chapters",
-    plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", graph: "Graph", learn: "Learn", settings: "Settings",
+    plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", graph: "Graph", runtime: "Runtime", learn: "Learn", settings: "Settings",
   };
   const navIcon: Record<string, string> = {
     dashboard: "D",
@@ -135,6 +141,7 @@ function App() {
     jobs: "J",
     bible: "B",
     graph: "G",
+    runtime: "T",
     learn: "K",
     settings: "S",
   };
@@ -150,6 +157,7 @@ function App() {
       case "jobs": return <JobsPage />;
       case "bible": return <BiblePage />;
       case "graph": return <KnowledgeGraphPage />;
+      case "runtime": return <RuntimePage selected={selected} settings={settings} refreshSettings={refreshSettings} />;
       case "learn": return <LearnPage />;
       case "settings": return <SettingsPage refreshSettings={refreshSettings} />;
       default: return <Dashboard />;
@@ -372,10 +380,10 @@ function Dashboard() {
     setPreviewLoading(true);
     setPreviewMsg("");
     try {
-      const preview = await invoke<WritingContextPreview>("get_next_chapter_context_preview", {
-        projectId: selected,
-        operatorControls: controlsPayload(),
-      });
+      const preview = await tauriClient.getNextChapterContextPreview<WritingContextPreview>(
+        selected,
+        controlsPayload(),
+      );
       setContextPreview(preview);
     } catch (e) {
       setContextPreview(null);
@@ -409,11 +417,11 @@ function Dashboard() {
   const handleWrite = async () => {
     setLoading(true); setMsg("");
     try {
-      const r = await invoke<GenerationResult>("generate_next_chapter", {
-        projectId: selected,
-        force: true,
-        operatorControls: controlsPayload(),
-      });
+      const r = await tauriClient.generateNextChapter<GenerationResult>(
+        selected,
+        true,
+        controlsPayload(),
+      );
       setMsg(r.message);
       await loadPreview();
     } catch (e) { setMsg("Error: " + e); }
@@ -423,7 +431,7 @@ function Dashboard() {
   const handleWeekly = async () => {
     setLoading(true); setMsg("");
     try {
-      const r = await invoke<GenerationResult>("run_weekly_arc_planner", { projectId: selected });
+      const r = await tauriClient.runWeeklyArcPlanner<GenerationResult>(selected);
       setMsg(r.message);
       await loadPreview();
     } catch (e) { setMsg("Error: " + e); }
@@ -439,6 +447,9 @@ function Dashboard() {
   const ragSources = retrievalTrace?.sources || [];
   const graphContext = contextPreview?.graph_context;
   const graphNeighbors = graphContext?.neighbors || [];
+  const activatedRules = contextPreview?.context_activation?.activated_rules || [];
+  const promptRuntime = contextPreview?.prompt_runtime;
+  const promptUnits = promptRuntime?.unit_traces || [];
   const latestPhase = [...pipelineSteps].reverse().find(step => !step.preview_kind);
 
   return (
@@ -505,7 +516,7 @@ function Dashboard() {
           <div className="action-row">
             <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>Write With Controls</button>
             <button className="btn btn-secondary" onClick={handleWeekly} disabled={loading || !selected}>Generate Weekly Plan</button>
-            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await invoke("reset_running", { projectId: selected }); }}>Reset Stuck Job</button>}
+            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await tauriClient.resetRunning(selected); }}>Reset Stuck Job</button>}
           </div>
         </section>
 
@@ -527,12 +538,53 @@ function Dashboard() {
                 <div><strong>{canon.unresolved_foreshadowing?.length || 0}</strong><span>Foreshadowing</span></div>
                 <div><strong>{graphNeighbors.length}</strong><span>Graph Links</span></div>
                 <div><strong>{retrievalTrace?.source_count || 0}</strong><span>RAG Sources</span></div>
-                <div><strong>{learned.length}</strong><span>Learned</span></div>
+                <div><strong>{activatedRules.length}</strong><span>Rules</span></div>
               </div>
+              {promptRuntime && (
+                <div className="prompt-runtime-preview">
+                  <div className="prompt-runtime-head">
+                    <div>
+                      <div className="status-label">Prompt Runtime</div>
+                      <strong>{promptRuntime.prompt_name} / {promptRuntime.generation_phase}</strong>
+                    </div>
+                    <span>{promptRuntime.token_estimate.toLocaleString()} tokens</span>
+                  </div>
+                  <div className="prompt-unit-strip">
+                    {promptUnits.map(unit => (
+                      <span key={unit.identifier}>
+                        {unit.order}. {unit.role} / {unit.identifier} / {unit.token_estimate}
+                      </span>
+                    ))}
+                  </div>
+                  <details className="prompt-runtime-details">
+                    <summary>System Prompt</summary>
+                    <pre>{promptRuntime.system_prompt}</pre>
+                  </details>
+                  <details className="prompt-runtime-details">
+                    <summary>User Prompt</summary>
+                    <pre>{promptRuntime.user_prompt}</pre>
+                  </details>
+                </div>
+              )}
               {continuity.previous_ending_hook && (
                 <div className="context-slice">
                   <div className="status-label">Previous Hook</div>
                   <p>{continuity.previous_ending_hook}</p>
+                </div>
+              )}
+              {activatedRules.length > 0 && (
+                <div className="activation-rule-list">
+                  <div className="status-label">Activated Canon Rules</div>
+                  {activatedRules.slice(0, 5).map(rule => (
+                    <div className="activation-rule-row" key={rule.rule_id}>
+                      <div>
+                        <strong>{rule.name}</strong>
+                        <span>{rule.source_key} / p{rule.priority} / {rule.token_estimate} tokens</span>
+                      </div>
+                      <p>{rule.content}</p>
+                      <em>{[...rule.matched_keywords, ...rule.matched_secondary_keywords].join(" / ")}</em>
+                    </div>
+                  ))}
                 </div>
               )}
               {graphNeighbors.length > 0 && (

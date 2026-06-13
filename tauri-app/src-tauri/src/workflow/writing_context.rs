@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use crate::db::connection::Database;
 use crate::db::vector_store::RetrievalTrace;
 use crate::models::{AppSettings, BibleData, ChapterPlan, LearningEntry, Project, VectorDocument};
+use crate::workflow::context_activation::ContextActivationTrace;
 
 pub const GRAPH_CONTEXT_MAX_HOPS: usize = 2;
 pub const GRAPH_CONTEXT_MAX_NEIGHBORS: usize = 12;
@@ -26,6 +27,7 @@ pub struct WritingContextPackage {
     pub continuity: serde_json::Value,
     pub canon: serde_json::Value,
     pub graph_context: GraphContext,
+    pub context_activation: ContextActivationTrace,
     pub retrieval: Vec<VectorDocument>,
     pub retrieval_trace: RetrievalTrace,
     pub style: serde_json::Value,
@@ -309,6 +311,7 @@ pub fn build_writing_context(
     retrieval: Vec<VectorDocument>,
     controls: Option<OperatorControls>,
 ) -> Result<WritingContextPackage, String> {
+    let controls = controls.unwrap_or_default();
     let chapters = crate::db::chapters::get_chapters(db, &project.id)?;
     let mut recent_summaries = Vec::new();
     let mut recent_body_excerpts = Vec::new();
@@ -355,6 +358,13 @@ pub fn build_writing_context(
         .collect::<Vec<_>>();
 
     let graph_context = build_graph_context(db, &project.id, plan).unwrap_or_default();
+    let context_activation = crate::workflow::context_activation::activate_context_rules(
+        db,
+        &project.id,
+        plan,
+        Some(&controls),
+    )
+    .unwrap_or_default();
     let retrieval = rerank_retrieval_with_graph_context(retrieval, &graph_context);
     let retrieval_trace = crate::db::vector_store::build_retrieval_trace(&retrieval);
 
@@ -397,6 +407,7 @@ pub fn build_writing_context(
             "world_lore": &canon.world_lore,
         }),
         graph_context,
+        context_activation,
         retrieval,
         retrieval_trace,
         style: json!({
@@ -405,6 +416,6 @@ pub fn build_writing_context(
         }),
         learned_patterns,
         learning_entry_context_ids,
-        operator_controls: controls.unwrap_or_default(),
+        operator_controls: controls,
     })
 }

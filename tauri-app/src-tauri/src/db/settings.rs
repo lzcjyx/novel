@@ -14,6 +14,15 @@ fn parse_optional_cost(value: &str) -> Option<f64> {
         .filter(|cost| cost.is_finite() && *cost >= 0.0)
 }
 
+fn parse_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim_matches('"').trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 pub fn get_settings(db: &Database) -> Result<AppSettings, String> {
     let mut settings = AppSettings::default();
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
@@ -73,6 +82,19 @@ pub fn get_settings(db: &Database) -> Result<AppSettings, String> {
             "blog_username" => settings.blog_username = Some(v.to_string()),
             "input_cost_per_million" => settings.input_cost_per_million = parse_optional_cost(v),
             "output_cost_per_million" => settings.output_cost_per_million = parse_optional_cost(v),
+            "draft_model_profile_id" => settings.draft_model_profile_id = parse_optional_string(v),
+            "review_model_profile_id" => {
+                settings.review_model_profile_id = parse_optional_string(v)
+            }
+            "repair_model_profile_id" => {
+                settings.repair_model_profile_id = parse_optional_string(v)
+            }
+            "embedding_model_profile_id" => {
+                settings.embedding_model_profile_id = parse_optional_string(v)
+            }
+            "summarization_model_profile_id" => {
+                settings.summarization_model_profile_id = parse_optional_string(v)
+            }
             _ => {}
         }
     }
@@ -95,6 +117,18 @@ fn save_optional_cost_setting(db: &Database, key: &str, value: Option<f64>) -> R
         .map(|cost| cost.to_string())
         .unwrap_or_default();
     save_setting(db, key, &value)
+}
+
+fn save_optional_string_setting(
+    db: &Database,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), String> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    save_setting(db, key, &format!("\"{}\"", value))
 }
 
 pub fn save_settings(db: &Database, settings: &AppSettings) -> Result<(), String> {
@@ -171,6 +205,31 @@ pub fn save_settings(db: &Database, settings: &AppSettings) -> Result<(), String
         db,
         "output_cost_per_million",
         settings.output_cost_per_million,
+    )?;
+    save_optional_string_setting(
+        db,
+        "draft_model_profile_id",
+        settings.draft_model_profile_id.as_deref(),
+    )?;
+    save_optional_string_setting(
+        db,
+        "review_model_profile_id",
+        settings.review_model_profile_id.as_deref(),
+    )?;
+    save_optional_string_setting(
+        db,
+        "repair_model_profile_id",
+        settings.repair_model_profile_id.as_deref(),
+    )?;
+    save_optional_string_setting(
+        db,
+        "embedding_model_profile_id",
+        settings.embedding_model_profile_id.as_deref(),
+    )?;
+    save_optional_string_setting(
+        db,
+        "summarization_model_profile_id",
+        settings.summarization_model_profile_id.as_deref(),
     )?;
     Ok(())
 }

@@ -3,8 +3,10 @@ use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 
 pub mod ai;
+pub mod commands;
 pub mod db;
 pub mod export;
+pub mod extensions;
 pub mod models;
 pub mod prompts;
 pub mod security;
@@ -244,28 +246,62 @@ fn get_api_key_fallback(state: &AppState, provider: &str) -> Result<String, Stri
 
 fn get_provider(state: &AppState) -> Result<Box<dyn ModelClient>, String> {
     let settings = db::settings::get_settings(&state.db)?;
-    let api_key = get_api_key_fallback(state, &settings.provider)?;
-    ai::factory::ProviderConfig {
-        provider_type: settings.provider,
-        api_key,
-        base_url: settings.base_url,
-        model: settings.model,
-        embedding_model: settings.embedding_model,
-        timeout_secs: 600,
-    }
-    .build()
+    provider_config_for_workflow(state, &settings, "base")?.build()
 }
 
-/// Get a dedicated embedding provider. Falls back to the main provider if no separate embedding config.
-fn get_embedding_provider(state: &AppState) -> Result<Box<dyn ModelClient>, String> {
-    let settings = db::settings::get_settings(&state.db)?;
+fn selected_model_profile_id<'a>(settings: &'a AppSettings, workflow: &str) -> Option<&'a str> {
+    match workflow {
+        "draft" => settings.draft_model_profile_id.as_deref(),
+        "review" => settings.review_model_profile_id.as_deref(),
+        "repair" | "revise" => settings.repair_model_profile_id.as_deref(),
+        "summarization" | "postprocess" => settings.summarization_model_profile_id.as_deref(),
+        _ => None,
+    }
+}
+
+pub(crate) fn provider_config_for_workflow(
+    state: &AppState,
+    settings: &AppSettings,
+    workflow: &str,
+) -> Result<ai::factory::ProviderConfig, String> {
+    let profile = selected_model_profile_id(settings, workflow)
+        .map(|profile_id| db::model_profiles::get_model_profile(&state.db, profile_id))
+        .transpose()?;
+    let provider_for_key = profile
+        .as_ref()
+        .map(|profile| profile.provider.as_str())
+        .unwrap_or(&settings.provider);
+    let api_key = get_api_key_fallback(state, provider_for_key)?;
+    Ok(ai::factory::provider_config_for_model_profile(
+        settings,
+        profile.as_ref(),
+        api_key,
+    ))
+}
+
+fn embedding_provider_config(
+    state: &AppState,
+    settings: &AppSettings,
+) -> Result<ai::factory::ProviderConfig, String> {
+    if let Some(profile_id) = settings.embedding_model_profile_id.as_deref() {
+        let profile = db::model_profiles::get_model_profile(&state.db, profile_id)?;
+        let api_key = get_api_key_fallback(state, &format!("emb_{}", profile.provider))?;
+        return Ok(ai::factory::ProviderConfig {
+            provider_type: profile.provider,
+            api_key,
+            base_url: profile.base_url,
+            model: profile.model.clone(),
+            embedding_model: profile.model,
+            timeout_secs: 600,
+        });
+    }
+
     let emb_provider = &settings.embedding_provider;
 
     if emb_provider == "none" {
         return Err("Embedding provider is 'none'. Configure an embedding provider in Settings for RAG support.".into());
     }
 
-    // Get the embedding provider's own API key (separate from main LLM key)
     let api_key = get_api_key_fallback(state, &format!("emb_{}", emb_provider))?;
     let base_url = if !settings.embedding_base_url.is_empty() {
         settings.embedding_base_url.clone()
@@ -277,15 +313,141 @@ fn get_embedding_provider(state: &AppState) -> Result<Box<dyn ModelClient>, Stri
         }
     };
 
-    ai::factory::ProviderConfig {
+    Ok(ai::factory::ProviderConfig {
         provider_type: emb_provider.clone(),
         api_key,
         base_url,
         model: settings.embedding_model.clone(),
         embedding_model: settings.embedding_model.clone(),
         timeout_secs: 600,
+    })
+}
+
+/// Get a dedicated embedding provider. Falls back to the main provider if no separate embedding config.
+pub(crate) fn get_embedding_provider(state: &AppState) -> Result<Box<dyn ModelClient>, String> {
+    let settings = db::settings::get_settings(&state.db)?;
+    embedding_provider_config(state, &settings)?.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_state() -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("provider-routing.db");
+        let db = Database::open(&db_path).unwrap();
+        db::run_migrations(&db).unwrap();
+        (
+            dir,
+            AppState {
+                db,
+                logs: Mutex::new(Vec::new()),
+                running: Mutex::new(false),
+            },
+        )
     }
-    .build()
+
+    fn save_api_key(db: &Database, key_name: &str, value: &str) {
+        db::settings::save_setting(db, key_name, &format!("\"{}\"", value)).unwrap();
+    }
+
+    fn profile_input(
+        id: &str,
+        provider: &str,
+        model: &str,
+        intended_use: &str,
+    ) -> db::model_profiles::ModelProfileInput {
+        db::model_profiles::ModelProfileInput {
+            id: Some(id.to_string()),
+            name: format!("{intended_use} profile"),
+            provider: provider.to_string(),
+            base_url: format!("https://{provider}.example.test/v1"),
+            model: model.to_string(),
+            context_window: 32000,
+            supports_json: true,
+            supports_streaming: true,
+            supports_embeddings: intended_use == "embedding",
+            input_cost_per_million: None,
+            output_cost_per_million: None,
+            intended_use: intended_use.to_string(),
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn workflow_provider_config_uses_profile_key_and_settings_fallback() {
+        let (_dir, state) = setup_state();
+        let mut settings = db::settings::get_settings(&state.db).unwrap();
+        settings.provider = "unit_base_provider".to_string();
+        settings.base_url = "https://base.example.test/v1".to_string();
+        settings.model = "base-model".to_string();
+        settings.draft_model_profile_id = Some("profile-draft".to_string());
+        db::settings::save_settings(&state.db, &settings).unwrap();
+        save_api_key(&state.db, "api_key_unit_base_provider", "base-key");
+        save_api_key(&state.db, "api_key_unit_profile_provider", "profile-key");
+        db::model_profiles::upsert_model_profile(
+            &state.db,
+            &profile_input(
+                "profile-draft",
+                "unit_profile_provider",
+                "profile-draft-model",
+                "draft",
+            ),
+        )
+        .unwrap();
+
+        let draft_config = provider_config_for_workflow(&state, &settings, "draft").unwrap();
+        assert_eq!(draft_config.provider_type, "unit_profile_provider");
+        assert_eq!(
+            draft_config.base_url,
+            "https://unit_profile_provider.example.test/v1"
+        );
+        assert_eq!(draft_config.model, "profile-draft-model");
+        assert_eq!(draft_config.api_key, "profile-key");
+
+        let repair_config = provider_config_for_workflow(&state, &settings, "repair").unwrap();
+        assert_eq!(repair_config.provider_type, "unit_base_provider");
+        assert_eq!(repair_config.base_url, "https://base.example.test/v1");
+        assert_eq!(repair_config.model, "base-model");
+        assert_eq!(repair_config.api_key, "base-key");
+    }
+
+    #[test]
+    fn embedding_provider_config_uses_embedding_profile_and_embedding_key() {
+        let (_dir, state) = setup_state();
+        let mut settings = db::settings::get_settings(&state.db).unwrap();
+        settings.embedding_provider = "unit_legacy_embedding_provider".to_string();
+        settings.embedding_base_url = "https://legacy-emb.example.test/v1".to_string();
+        settings.embedding_model = "legacy-embedding-model".to_string();
+        settings.embedding_model_profile_id = Some("profile-embedding".to_string());
+        db::settings::save_settings(&state.db, &settings).unwrap();
+        save_api_key(
+            &state.db,
+            "api_key_emb_unit_embedding_provider",
+            "embedding-key",
+        );
+        db::model_profiles::upsert_model_profile(
+            &state.db,
+            &profile_input(
+                "profile-embedding",
+                "unit_embedding_provider",
+                "profile-embedding-model",
+                "embedding",
+            ),
+        )
+        .unwrap();
+
+        let config = embedding_provider_config(&state, &settings).unwrap();
+        assert_eq!(config.provider_type, "unit_embedding_provider");
+        assert_eq!(
+            config.base_url,
+            "https://unit_embedding_provider.example.test/v1"
+        );
+        assert_eq!(config.model, "profile-embedding-model");
+        assert_eq!(config.embedding_model, "profile-embedding-model");
+        assert_eq!(config.api_key, "embedding-key");
+    }
 }
 
 // ============================================================================
@@ -424,7 +586,12 @@ async fn generate_next_chapter(
         running: &state.running,
     };
 
-    let provider = get_provider(&state)?;
+    let settings = db::settings::get_settings(&state.db)?;
+    let draft_provider = provider_config_for_workflow(&state, &settings, "draft")?.build()?;
+    let review_provider = provider_config_for_workflow(&state, &settings, "review")?.build()?;
+    let repair_provider = provider_config_for_workflow(&state, &settings, "repair")?.build()?;
+    let postprocess_provider =
+        provider_config_for_workflow(&state, &settings, "summarization")?.build()?;
     let emb_provider = get_embedding_provider(&state).ok(); // Ok if configured, None if "none"
     add_log(
         &state,
@@ -442,9 +609,14 @@ async fn generate_next_chapter(
             let _ = app_for_events.emit_to("main", "pipeline-step", &ev);
         }
     });
-    let result = workflow::chapter_production::generate_next_chapter(
+    let result = workflow::chapter_production::generate_next_chapter_with_stage_providers(
         &state.db,
-        provider.as_ref(),
+        workflow::chapter_production::ChapterPipelineProviders {
+            draft: draft_provider.as_ref(),
+            review: review_provider.as_ref(),
+            repair: repair_provider.as_ref(),
+            postprocess: postprocess_provider.as_ref(),
+        },
         emb_provider.as_ref().map(|p| p.as_ref()),
         &project_id,
         force,
@@ -983,7 +1155,8 @@ async fn retry_chapter(
     state: tauri::State<'_, AppState>,
     chapter_id: String,
 ) -> Result<RevisionResult, String> {
-    let provider = get_provider(&state)?;
+    let settings = db::settings::get_settings(&state.db)?;
+    let provider = provider_config_for_workflow(&state, &settings, "repair")?.build()?;
     add_log(&state, &format!("Retrying chapter: {}", &chapter_id[..8]));
     let result =
         workflow::review_repair::retry_chapter(&state.db, provider.as_ref(), &chapter_id).await?;
@@ -997,50 +1170,6 @@ async fn get_chapter_plans(
     project_id: String,
 ) -> Result<Vec<ChapterPlan>, String> {
     db::chapters::get_chapter_plans(&state.db, &project_id)
-}
-
-#[tauri::command]
-async fn get_next_chapter_context_preview(
-    state: tauri::State<'_, AppState>,
-    project_id: String,
-    operator_controls: Option<workflow::writing_context::OperatorControls>,
-) -> Result<serde_json::Value, String> {
-    let project = db::projects::get_project(&state.db, &project_id)?;
-    let plan = db::chapters::get_next_chapter_plan(&state.db, &project_id)?
-        .ok_or_else(|| "No planned chapter found. Generate a weekly plan first.".to_string())?;
-    let canon = db::bible::get_bible(&state.db, &project_id)?;
-    let settings = db::settings::get_settings(&state.db)?;
-    let retrieval_query =
-        workflow::writing_context::build_retrieval_query(&plan, operator_controls.as_ref());
-    let mut retrieval_documents = Vec::new();
-
-    if !retrieval_query.trim().is_empty() {
-        if let Ok(embed_client) = get_embedding_provider(&state) {
-            if let Ok(embeddings) = embed_client.embed(&[retrieval_query]).await {
-                if let Some(query_embedding) = embeddings.first() {
-                    retrieval_documents = db::vector_store::search_similar_documents(
-                        &state.db,
-                        &project_id,
-                        query_embedding,
-                        8,
-                    )
-                    .unwrap_or_default();
-                }
-            }
-        }
-    }
-
-    let package = workflow::writing_context::build_writing_context(
-        &state.db,
-        &project,
-        &plan,
-        &canon,
-        &settings,
-        retrieval_documents,
-        operator_controls,
-    )?;
-
-    serde_json::to_value(package).map_err(|e| format!("Serialize context preview: {}", e))
 }
 
 #[tauri::command]
@@ -1611,7 +1740,7 @@ pub fn run() {
             generate_next_chapter,
             retry_chapter,
             get_chapter_plans,
-            get_next_chapter_context_preview,
+            commands::runtime::get_next_chapter_context_preview,
             get_chapters,
             get_chapter_versions,
             read_chapter_file,
@@ -1623,6 +1752,31 @@ pub fn run() {
             get_bible,
             ingest_bible_note,
             update_canon_rule,
+            commands::runtime::get_context_rules,
+            commands::runtime::upsert_context_rule,
+            commands::runtime::import_sillytavern_lorebook,
+            commands::runtime::export_novel_bible_package,
+            commands::runtime::import_novel_bible_package,
+            commands::runtime::export_project_package,
+            commands::runtime::import_project_package,
+            commands::runtime::upsert_prompt_preset,
+            commands::runtime::upsert_prompt_unit,
+            commands::runtime::list_prompt_presets,
+            commands::runtime::get_prompt_preset_package,
+            commands::runtime::import_prompt_preset_package,
+            commands::runtime::upsert_model_profile,
+            commands::runtime::get_model_profile,
+            commands::runtime::list_model_profiles,
+            commands::runtime::set_workflow_model_profile,
+            commands::runtime::validate_model_profile,
+            commands::runtime::get_builtin_operator_recipes,
+            commands::runtime::run_operator_recipe,
+            commands::runtime::get_draft_candidates,
+            commands::runtime::select_draft_candidate,
+            commands::runtime::validate_extension_manifest,
+            commands::runtime::import_extension_package,
+            commands::runtime::list_extension_packages,
+            commands::runtime::set_extension_enabled,
             get_knowledge_graph,
             get_knowledge_graph_neighborhood,
             create_knowledge_graph_edge,

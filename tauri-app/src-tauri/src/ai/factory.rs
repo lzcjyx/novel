@@ -1,5 +1,7 @@
 use super::client::ModelClient;
 use super::{anthropic, deepseek, gemini, openai, openai_compat};
+use crate::db::model_profiles::ModelProfile;
+use crate::models::AppSettings;
 
 pub struct ProviderConfig {
     pub provider_type: String,
@@ -70,5 +72,36 @@ impl ProviderConfig {
             })),
             _ => Err(format!("Unknown provider: {}", self.provider_type)),
         }
+    }
+}
+
+pub fn provider_config_for_model_profile(
+    settings: &AppSettings,
+    profile: Option<&ModelProfile>,
+    api_key: String,
+) -> ProviderConfig {
+    let (provider_type, base_url, model) = profile
+        .map(|profile| {
+            (
+                profile.provider.clone(),
+                profile.base_url.clone(),
+                profile.model.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                settings.provider.clone(),
+                settings.base_url.clone(),
+                settings.model.clone(),
+            )
+        });
+
+    ProviderConfig {
+        provider_type,
+        api_key,
+        base_url,
+        model,
+        embedding_model: settings.embedding_model.clone(),
+        timeout_secs: 600,
     }
 }

@@ -197,6 +197,67 @@ fn migrations_add_content_hash_to_existing_vector_table_before_index() {
 }
 
 #[test]
+fn migrations_expand_generation_job_status_check_for_cancelled() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("old-generation-job-status.db");
+    let db = Database::open(&db_path).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE generation_jobs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                chapter_plan_id TEXT NOT NULL REFERENCES chapter_plans(id) ON DELETE CASCADE,
+                job_date TEXT NOT NULL DEFAULT (date('now')),
+                status TEXT NOT NULL DEFAULT 'started'
+                    CHECK (status IN ('started','draft_created','reviewing','revising','publishing','completed','failed','needs_human_review','skipped')),
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                error_message TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(project_id, chapter_plan_id, job_date)
+            );
+            ",
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+
+    let project_id = tauri_app_lib::db::projects::create_project(
+        &db,
+        "Cancelled Migration",
+        None,
+        Some("mystery"),
+        None,
+        Some("adult"),
+        Some("quiet"),
+        Some("quiet"),
+        Some(100000),
+        Some(1000),
+    )
+    .unwrap()
+    .id;
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO chapter_plans (id, project_id, sequence, title, status)
+         VALUES ('plan-cancelled', ?1, 1, 'Cancelled', 'planned')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO generation_jobs (id, project_id, chapter_plan_id, status)
+         VALUES ('job-cancelled', ?1, 'plan-cancelled', 'cancelled')",
+        rusqlite::params![project_id],
+    )
+    .unwrap();
+}
+
+#[test]
 fn test_project_crud() {
     let (conn, _dir) = setup_db();
     let id = uuid();

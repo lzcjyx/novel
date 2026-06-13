@@ -1,11 +1,12 @@
 use crate::ai::client::{ModelClient, ModelUsageReport};
 use crate::db::connection::Database;
+use crate::db::model_profiles::ModelProfile;
 use crate::db::{bible, blog_posts, chapters, generation_jobs, projects, reviews};
 use crate::export::markdown;
 use crate::models::*;
 use crate::prompts;
 use crate::workflow::{
-    canon_updater, learning, lock, prompt_rendering, review_agents, review_arbiter,
+    canon_updater, learning, lock, prompt_rendering, prompt_runtime, review_agents, review_arbiter,
     task_transaction, writing_context,
 };
 use sha2::{Digest, Sha256};
@@ -83,6 +84,7 @@ fn record_model_usage(
     job_id: &str,
     phase: &str,
     settings: &AppSettings,
+    model_profile: Option<&ModelProfile>,
     system_prompt: &str,
     user_prompt: &str,
     output_text: &str,
@@ -112,21 +114,94 @@ fn record_model_usage(
     } else {
         "estimated"
     };
-    let _ = generation_jobs::record_job_model_usage_with_source(
+    let (provider, model) = model_identity(settings, model_profile);
+    let input_cost_per_million = model_profile
+        .and_then(|profile| profile.input_cost_per_million)
+        .or(settings.input_cost_per_million);
+    let output_cost_per_million = model_profile
+        .and_then(|profile| profile.output_cost_per_million)
+        .or(settings.output_cost_per_million);
+    let _ = generation_jobs::record_job_model_usage_with_source_and_profile(
         db,
         job_id,
         phase,
-        &settings.provider,
-        &settings.model,
+        &provider,
+        &model,
         prompt_tokens,
         completion_tokens,
-        settings.input_cost_per_million,
-        settings.output_cost_per_million,
+        input_cost_per_million,
+        output_cost_per_million,
         usage_source,
+        model_profile.map(model_profile_snapshot),
     );
 }
 
-fn build_context_metadata(context: &writing_context::WritingContextPackage) -> serde_json::Value {
+fn model_identity(settings: &AppSettings, profile: Option<&ModelProfile>) -> (String, String) {
+    profile
+        .map(|profile| (profile.provider.clone(), profile.model.clone()))
+        .unwrap_or_else(|| (settings.provider.clone(), settings.model.clone()))
+}
+
+fn model_profile_snapshot(profile: &ModelProfile) -> serde_json::Value {
+    serde_json::json!({
+        "id": profile.id,
+        "name": profile.name,
+        "provider": profile.provider,
+        "model": profile.model,
+        "context_window": profile.context_window,
+        "supports_json": profile.supports_json,
+        "supports_streaming": profile.supports_streaming,
+        "supports_embeddings": profile.supports_embeddings,
+        "input_cost_per_million": profile.input_cost_per_million,
+        "output_cost_per_million": profile.output_cost_per_million,
+        "intended_use": profile.intended_use,
+    })
+}
+
+fn review_usage_context(canon: &review_agents::CanonContext) -> String {
+    serde_json::json!({
+        "writing_brief_json": &canon.writing_brief_json,
+        "characters_json": &canon.characters_json,
+        "character_states_json": &canon.character_states_json,
+        "previous_chapters_json": &canon.previous_chapters_json,
+        "active_plot_threads_json": &canon.active_plot_threads_json,
+        "unresolved_foreshadowing_json": &canon.unresolved_foreshadowing_json,
+        "world_lore_json": &canon.world_lore_json,
+        "locations_json": &canon.locations_json,
+        "organizations_json": &canon.organizations_json,
+        "items_json": &canon.items_json,
+        "magic_systems_json": &canon.magic_systems_json,
+        "canon_rules_json": &canon.canon_rules_json,
+        "timeline_json": &canon.timeline_json,
+        "style_guide_json": &canon.style_guide_json,
+        "blog_config_json": &canon.blog_config_json,
+        "project_policy_json": &canon.project_policy_json,
+    })
+    .to_string()
+}
+
+fn resolve_model_profile(
+    db: &Database,
+    settings: &AppSettings,
+    workflow: &str,
+) -> Result<Option<ModelProfile>, String> {
+    let profile_id = match workflow {
+        "draft" => settings.draft_model_profile_id.as_deref(),
+        "review" => settings.review_model_profile_id.as_deref(),
+        "repair" | "revise" => settings.repair_model_profile_id.as_deref(),
+        "embedding" => settings.embedding_model_profile_id.as_deref(),
+        "summarization" => settings.summarization_model_profile_id.as_deref(),
+        _ => None,
+    };
+    profile_id
+        .map(|id| crate::db::model_profiles::get_model_profile(db, id).map(Some))
+        .unwrap_or(Ok(None))
+}
+
+fn build_context_metadata(
+    context: &writing_context::WritingContextPackage,
+    prompt_runtime: Option<&prompt_runtime::AssembledPrompt>,
+) -> serde_json::Value {
     let selected_retrieval_source_keys = context
         .retrieval_trace
         .sources
@@ -169,20 +244,95 @@ fn build_context_metadata(context: &writing_context::WritingContextPackage) -> s
         hex::encode(hasher.finalize())
     };
 
-    serde_json::json!({
+    let mut metadata = serde_json::json!({
         "selected_retrieval_source_keys": selected_retrieval_source_keys,
         "selected_retrieval_document_ids": selected_retrieval_document_ids,
         "retrieval_trace": context.retrieval_trace,
         "graph_context": context.graph_context,
+        "context_activation": context.context_activation,
         "selected_learning_entry_ids": selected_learning_entry_ids,
         "selected_learning_entries": selected_learning_entries,
         "learning_context_hash": learning_context_hash,
-    })
+    });
+
+    if let Some(prompt_runtime) = prompt_runtime {
+        metadata["prompt_runtime"] = serde_json::json!({
+            "prompt_name": prompt_runtime.prompt_name,
+            "generation_phase": prompt_runtime.generation_phase,
+            "token_estimate": prompt_runtime.token_estimate,
+            "unit_traces": prompt_runtime.unit_traces,
+        });
+    }
+
+    metadata
+}
+
+fn run_extension_hook_for_job(
+    db: &Database,
+    job_id: &str,
+    hook: &str,
+    workflow_metadata: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let extensions = crate::extensions::host::list_extension_packages(db)?;
+    if extensions.is_empty() {
+        return Ok(workflow_metadata);
+    }
+    let output = crate::extensions::host::execute_extension_hook_for_job(
+        db,
+        job_id,
+        crate::extensions::host::ExtensionHookRequest {
+            hook: hook.to_string(),
+            workflow_metadata,
+            extensions,
+        },
+    )?;
+    Ok(output.workflow_metadata)
+}
+
+pub struct ChapterPipelineProviders<'a> {
+    pub draft: &'a dyn ModelClient,
+    pub review: &'a dyn ModelClient,
+    pub repair: &'a dyn ModelClient,
+    pub postprocess: &'a dyn ModelClient,
+}
+
+impl<'a> ChapterPipelineProviders<'a> {
+    pub fn single(provider: &'a dyn ModelClient) -> Self {
+        Self {
+            draft: provider,
+            review: provider,
+            repair: provider,
+            postprocess: provider,
+        }
+    }
 }
 
 pub async fn generate_next_chapter(
     db: &Database,
     provider: &dyn ModelClient,
+    emb_provider: Option<&dyn ModelClient>,
+    project_id: &str,
+    force: bool,
+    log_tx: &mpsc::Sender<String>,
+    event_tx: &mpsc::Sender<PipelineEvent>,
+    operator_controls: Option<writing_context::OperatorControls>,
+) -> Result<GenerationResult, String> {
+    generate_next_chapter_with_stage_providers(
+        db,
+        ChapterPipelineProviders::single(provider),
+        emb_provider,
+        project_id,
+        force,
+        log_tx,
+        event_tx,
+        operator_controls,
+    )
+    .await
+}
+
+pub async fn generate_next_chapter_with_stage_providers(
+    db: &Database,
+    providers: ChapterPipelineProviders<'_>,
     emb_provider: Option<&dyn ModelClient>,
     project_id: &str,
     force: bool,
@@ -327,7 +477,7 @@ pub async fn generate_next_chapter(
     if retrieval_query.trim().is_empty() {
         retrieval_detail = "empty retrieval query; using structured context".to_string();
     } else if let Some(embed_client) = emb_provider {
-        match embed_client.embed(&[retrieval_query]).await {
+        match embed_client.embed(&[retrieval_query.clone()]).await {
             Ok(embeddings) if !embeddings.is_empty() => {
                 match crate::db::vector_store::search_similar_documents(
                     db,
@@ -368,6 +518,18 @@ pub async fn generate_next_chapter(
         Some(&retrieval_detail),
         18.0,
     );
+    let _before_context_metadata = run_extension_hook_for_job(
+        db,
+        &job_id,
+        "before_context_build",
+        serde_json::json!({
+            "project_id": project_id,
+            "chapter_plan_id": &plan.id,
+            "retrieval_query": retrieval_query,
+            "retrieval_document_count": retrieval_documents.len(),
+        }),
+    )?;
+
     // 9. Build writing context package
     let prev_chapters = chapters::get_chapters(db, project_id)?;
     let prev_context = prev_chapters
@@ -385,6 +547,12 @@ pub async fn generate_next_chapter(
         retrieval_documents.clone(),
         operator_controls,
     )?;
+    let _after_context_metadata = run_extension_hook_for_job(
+        db,
+        &job_id,
+        "after_context_build",
+        build_context_metadata(&writing_context, None),
+    )?;
     let used_learning_ids = writing_context
         .learned_patterns
         .iter()
@@ -392,20 +560,28 @@ pub async fn generate_next_chapter(
         .collect::<Vec<_>>();
     generation_jobs::record_job_learning_context(db, &job_id, &used_learning_ids)?;
     let writing_context_json = serde_json::to_string_pretty(&writing_context).unwrap_or_default();
+    let draft_model_profile = resolve_model_profile(db, &settings, "draft")?;
+    let review_model_profile = resolve_model_profile(db, &settings, "review")?;
+    let repair_model_profile = resolve_model_profile(db, &settings, "repair")?;
 
-    let prompt_hash = {
+    let context_hash = {
         let mut hasher = Sha256::new();
         hasher.update(&writing_context_json);
         hex::encode(hasher.finalize())
     };
 
     // 10. Render draft writer prompt
-    let draft_template = prompts::load_prompt("draft_writer")?;
-    let vars = HashMap::from([("WRITING_CONTEXT_JSON", writing_context_json.clone())]);
-    let rendered = prompt_rendering::render_prompt_strict("draft_writer", &draft_template, &vars)?;
-    let system_prompt = rendered;
-    let user_prompt =
-        "请基于 system prompt 中的 writing_context 生成本章正文，只输出合法 JSON。".to_string();
+    let assembled_draft_prompt =
+        prompt_runtime::assemble_builtin_draft_prompt(&writing_context_json)?;
+    let system_prompt = assembled_draft_prompt.system_prompt.clone();
+    let user_prompt = assembled_draft_prompt.user_prompt.clone();
+    let prompt_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&system_prompt);
+        hasher.update("\n---USER---\n");
+        hasher.update(&user_prompt);
+        hex::encode(hasher.finalize())
+    };
 
     log(log_tx, "Calling draft writer...");
 
@@ -429,7 +605,8 @@ pub async fn generate_next_chapter(
         }
     });
 
-    let draft = match provider
+    let draft = match providers
+        .draft
         .generate_json_with_usage(&system_prompt, &user_prompt, &json_schema, 32768)
         .await
     {
@@ -440,6 +617,7 @@ pub async fn generate_next_chapter(
                 &job_id,
                 "generate_draft",
                 &settings,
+                draft_model_profile.as_ref(),
                 &system_prompt,
                 &user_prompt,
                 &output_text,
@@ -514,14 +692,14 @@ pub async fn generate_next_chapter(
         &body,
         word_count,
         &summary,
-        &settings.provider,
-        &settings.model,
+        &model_identity(&settings, draft_model_profile.as_ref()).0,
+        &model_identity(&settings, draft_model_profile.as_ref()).1,
         &prompt_hash,
-        &prompt_hash,
+        &context_hash,
     )?;
     task_transaction::record_task_owned_row(db, &job_id, "chapters", &chapter_id)?;
     task_transaction::record_task_owned_row(db, &job_id, "chapter_versions", &version_id)?;
-    let context_metadata = build_context_metadata(&writing_context);
+    let context_metadata = build_context_metadata(&writing_context, Some(&assembled_draft_prompt));
     chapters::update_chapter_version_metadata(db, &version_id, &context_metadata)?;
 
     log(
@@ -602,9 +780,51 @@ pub async fn generate_next_chapter(
     };
 
     log(log_tx, "Running 7 parallel review agents...");
-    let agent_reviews =
-        review_agents::run_review_agents(provider, &chapter, &version, &canon_ctx, &project)
-            .await?;
+    let _before_review_metadata = run_extension_hook_for_job(
+        db,
+        &job_id,
+        "before_review",
+        serde_json::json!({
+            "project_id": project_id,
+            "chapter_id": &chapter_id,
+            "chapter_version_id": &version_id,
+            "chapter_title": chapter.title.as_deref(),
+        }),
+    )?;
+    let agent_reviews = review_agents::run_review_agents(
+        providers.review,
+        &chapter,
+        &version,
+        &canon_ctx,
+        &project,
+    )
+    .await?;
+    let _after_review_metadata = run_extension_hook_for_job(
+        db,
+        &job_id,
+        "after_review",
+        serde_json::json!({
+            "project_id": project_id,
+            "chapter_id": &chapter_id,
+            "chapter_version_id": &version_id,
+            "reviews": agent_reviews.iter().map(|review| serde_json::json!({
+                "agent_name": &review.agent_name,
+                "score": review.score,
+                "pass": review.pass,
+            })).collect::<Vec<_>>(),
+        }),
+    )?;
+    record_model_usage(
+        db,
+        &job_id,
+        "review_agents",
+        &settings,
+        review_model_profile.as_ref(),
+        &review_usage_context(&canon_ctx),
+        version.body_markdown.as_deref().unwrap_or(""),
+        &serde_json::to_string(&agent_reviews).unwrap_or_default(),
+        None,
+    );
 
     // Log each review score
     for review in &agent_reviews {
@@ -797,7 +1017,8 @@ pub async fn generate_next_chapter(
             (rev_rendered.clone(), rev_rendered)
         };
 
-        match provider
+        match providers
+            .repair
             .generate_json_with_usage(&rev_sys, &rev_user, &json_schema, 32768)
             .await
         {
@@ -808,6 +1029,7 @@ pub async fn generate_next_chapter(
                     &job_id,
                     "revise",
                     &settings,
+                    repair_model_profile.as_ref(),
                     &rev_sys,
                     &rev_user,
                     &output_text,
@@ -831,7 +1053,7 @@ pub async fn generate_next_chapter(
                     conn.execute(
                         "INSERT INTO chapter_versions (id, chapter_id, project_id, version_number, version_type, title, body_markdown, word_count, model_provider, model_name, created_by_agent)
                          VALUES (?1, ?2, ?3, ?4, 'revised', ?5, ?6, ?7, ?8, ?9, 'revision_writer')",
-                        rusqlite::params![rev_version_id, chapter_id, project_id, 1 + revise_count, title, rev_body, rev_wc, settings.provider, settings.model],
+                        rusqlite::params![rev_version_id, chapter_id, project_id, 1 + revise_count, title, rev_body, rev_wc, model_identity(&settings, repair_model_profile.as_ref()).0, model_identity(&settings, repair_model_profile.as_ref()).1],
                     ).map_err(|e| format!("Insert revision: {}", e))?;
                 }
                 task_transaction::record_task_owned_row(
@@ -886,9 +1108,24 @@ pub async fn generate_next_chapter(
                 let version =
                     chapters::get_latest_version(db, &chapter_id)?.ok_or("Version not found")?;
                 current_reviews = review_agents::run_review_agents(
-                    provider, &chapter, &version, &canon_ctx, &project,
+                    providers.review,
+                    &chapter,
+                    &version,
+                    &canon_ctx,
+                    &project,
                 )
                 .await?;
+                record_model_usage(
+                    db,
+                    &job_id,
+                    "review_agents_after_revise",
+                    &settings,
+                    review_model_profile.as_ref(),
+                    &review_usage_context(&canon_ctx),
+                    version.body_markdown.as_deref().unwrap_or(""),
+                    &serde_json::to_string(&current_reviews).unwrap_or_default(),
+                    None,
+                );
                 for review in &current_reviews {
                     log(
                         log_tx,
@@ -986,6 +1223,18 @@ pub async fn generate_next_chapter(
     let filename = match export_result {
         Ok(path) => {
             log(log_tx, &format!("Chapter exported: {}", path));
+            let _export_target_metadata = run_extension_hook_for_job(
+                db,
+                &job_id,
+                "export_target",
+                serde_json::json!({
+                    "project_id": project_id,
+                    "chapter_id": &chapter_id,
+                    "chapter_title": &final_title,
+                    "export_path": &path,
+                    "decision": &final_decision,
+                }),
+            )?;
             emit_job_event(db, &job_id, event_tx, "export", "done", Some(&path), 85.0);
             if project.auto_publish && final_decision == "publish_ready" {
                 log(log_tx, "Generating blog metadata...");
@@ -1016,7 +1265,7 @@ pub async fn generate_next_chapter(
     log(log_tx, "Updating canon...");
     match canon_updater::update_canon_after_chapter(
         db,
-        provider,
+        providers.postprocess,
         project_id,
         &chapter_id,
         &current_draft,
@@ -1052,7 +1301,7 @@ pub async fn generate_next_chapter(
     })
     .to_string();
     match learning::reflect_on_chapter(
-        provider,
+        providers.postprocess,
         &final_title,
         &final_body,
         &reflection_scores,

@@ -4,6 +4,7 @@ pub mod deepseek;
 pub mod gemini;
 pub mod openai;
 pub mod openai_compat;
+pub mod provider_capabilities;
 pub mod types;
 
 pub mod factory;
