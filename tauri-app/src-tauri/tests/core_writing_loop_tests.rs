@@ -99,6 +99,7 @@ fn empty_review_canon() -> CanonContext {
         canon_rules_json: "[]".to_string(),
         timeline_json: "[]".to_string(),
         style_guide_json: "[]".to_string(),
+        extension_review_rubrics_json: "[]".to_string(),
         blog_config_json: "{}".to_string(),
         project_policy_json: "{}".to_string(),
     }
@@ -402,8 +403,8 @@ struct CapturingProvider {
     systems: Arc<Mutex<Vec<String>>>,
     users: Arc<Mutex<Vec<String>>>,
     embed_calls: Arc<Mutex<usize>>,
-    canon_graph_edges: bool,
     embed_kinds: Arc<Mutex<Vec<EmbeddingInputKind>>>,
+    canon_graph_edges: bool,
     canon_task_rows: bool,
     review_text: Option<String>,
     usage: Option<ModelUsageReport>,
@@ -490,7 +491,7 @@ impl ModelClient for CapturingProvider {
 
         Ok(json!({
             "title": "门后旧名",
-            "body_markdown": "最终稿正文。门后的人没有现身，只把他的旧名写在潮湿墙面上。这个版本必须进入 canon。",
+            "body_markdown": "最终稿正文。门后的人没有现身，只把他的旧名写在潮湿墙面上。票面写着三百枚灵石。这个版本必须进入 canon。",
             "summary": "最终稿摘要",
             "word_count": 120,
             "pov_character": "主角",
@@ -671,6 +672,71 @@ async fn publication_reviewer_metadata_is_preserved_for_publish_drafts() {
     );
 }
 
+#[tokio::test]
+async fn style_reviewer_prompt_includes_compiled_style_assets() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let chapter = review_chapter(&project_id);
+    let version = review_version(&project_id);
+    let mut canon = empty_review_canon();
+    canon.writing_brief_json = serde_json::json!({
+        "style": {
+            "style_assets": {
+                "asset_ids": ["style-asset-1"],
+                "prompt_instructions": "- 冷硬物件 [learned_style_pattern]: priority=92",
+                "positive_examples": ["他把杯口转向墙角。"],
+                "anti_ai_rules": {
+                    "forbidden_phrases": ["眼中闪过"],
+                    "required_phrases": ["金属触感"]
+                }
+            }
+        }
+    })
+    .to_string();
+    let provider = CapturingProvider::default();
+
+    review_agents::run_review_agents(&provider, &chapter, &version, &canon, &project)
+        .await
+        .expect("review agents should run");
+
+    let systems = provider.systems.lock().unwrap();
+    let style_prompt = systems
+        .iter()
+        .find(|prompt| prompt.contains("你是 style_reviewer"))
+        .expect("style reviewer prompt should be captured");
+    assert!(style_prompt.contains("冷硬物件"));
+    assert!(style_prompt.contains("required_phrases"));
+}
+
+#[tokio::test]
+async fn extension_review_rubrics_are_injected_into_reviewer_prompts() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let project = tauri_app_lib::db::projects::get_project(&db, &project_id).unwrap();
+    let chapter = review_chapter(&project_id);
+    let version = review_version(&project_id);
+    let mut canon = empty_review_canon();
+    canon.extension_review_rubrics_json = serde_json::json!([{
+        "rubric_id": "anti-ai",
+        "checks": ["低信息密度句", "过度解释人物心理"]
+    }])
+    .to_string();
+    let provider = CapturingProvider::default();
+
+    review_agents::run_review_agents(&provider, &chapter, &version, &canon, &project)
+        .await
+        .expect("review agents should run");
+
+    let systems = provider.systems.lock().unwrap();
+    let style_prompt = systems
+        .iter()
+        .find(|prompt| prompt.contains("你是 style_reviewer"))
+        .expect("style reviewer prompt should be captured");
+    assert!(style_prompt.contains("低信息密度句"));
+    assert!(style_prompt.contains("过度解释人物心理"));
+}
+
 #[test]
 fn local_blog_draft_uses_latest_publication_review_metadata() {
     let db = setup_db();
@@ -754,6 +820,25 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     )
     .unwrap();
     drop(conn);
+    tauri_app_lib::db::style_assets::upsert_style_asset(
+        &db,
+        &tauri_app_lib::db::style_assets::StyleAssetInput {
+            id: Some("style-pipe".to_string()),
+            project_id: project_id.clone(),
+            name: "冷硬物件资产".to_string(),
+            asset_type: "prose_rule".to_string(),
+            scope_type: "project".to_string(),
+            scope_id: None,
+            features: serde_json::json!({"cadence": "short object beats"}),
+            positive_examples: vec!["他把杯口转向墙角。".to_string()],
+            negative_examples: vec![],
+            anti_ai_rules: serde_json::json!({"required_phrases": ["票面"]}),
+            enabled: true,
+            priority: 30,
+            metadata: serde_json::json!({"fixture": "core-loop"}),
+        },
+    )
+    .unwrap();
     tauri_app_lib::db::vector_store::insert_vector_document(
         &db,
         &project_id,
@@ -846,6 +931,7 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     let systems = provider.systems.lock().unwrap().join("\n---\n");
     assert!(!systems.contains("WRITING_CONTEXT_JSON"));
     assert!(systems.contains("克制悬疑"));
+    assert!(systems.contains("冷硬物件资产"));
     assert!(systems.contains("learning_entry:learn-pipe"));
     assert!(systems.contains("门后旧名"));
     assert!(systems.contains("旧名伏笔"));
@@ -875,6 +961,25 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
         version_metadata["selected_learning_entries"][0]["pattern_name"].as_str(),
         Some("克制悬疑")
     );
+    assert_eq!(
+        version_metadata["style_asset_ids"],
+        serde_json::json!(["style-pipe"])
+    );
+    assert!(version_metadata["style_assets"]["prompt_instructions"]
+        .as_str()
+        .unwrap_or("")
+        .contains("冷硬物件资产"));
+    let context_source_trace = version_metadata["context_activation"]["source_trace"]
+        .as_array()
+        .expect("context source trace should be present");
+    assert!(context_source_trace.iter().any(|source| {
+        source["source_key"].as_str() == Some("learning_entry:learn-pipe")
+            && source["reason"].as_str() == Some("learning_entry_selection")
+    }));
+    assert!(context_source_trace.iter().any(|source| {
+        source["source_key"].as_str() == Some("style_asset:style-pipe")
+            && source["reason"].as_str() == Some("style_asset_enabled")
+    }));
     assert_eq!(
         version_metadata["prompt_runtime"]["prompt_name"].as_str(),
         Some("draft_writer")
@@ -968,6 +1073,18 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
         "SELECT id FROM knowledge_graph_edges WHERE project_id = ?1 ORDER BY id",
         &project_id,
     );
+    let hard_fact_ids = ids_for(
+        &db,
+        "SELECT id FROM hard_facts WHERE project_id = ?1 ORDER BY id",
+        &project_id,
+    );
+    let hard_facts = tauri_app_lib::db::hard_facts::list_hard_facts(&db, &project_id, true)
+        .expect("hard facts should load after final chapter");
+    assert!(
+        hard_facts.iter().any(|fact| fact.object == "三百枚灵石"
+            && fact.chapter_version_id.as_deref() == Some(latest_version.id.as_str())),
+        "final chapter should materialize amount hard facts"
+    );
     assert_owned_rows_include(owned_rows, "agent_reviews", &review_ids);
     assert_owned_rows_include(owned_rows, "review_scores", &score_ids);
     assert_owned_rows_include(owned_rows, "blog_posts", &blog_ids);
@@ -975,6 +1092,7 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     assert_owned_rows_include(owned_rows, "timeline_events", &timeline_event_ids);
     assert_owned_rows_include(owned_rows, "foreshadowing", &foreshadowing_ids);
     assert_owned_rows_include(owned_rows, "knowledge_graph_edges", &graph_edge_ids);
+    assert_owned_rows_include(owned_rows, "hard_facts", &hard_fact_ids);
     assert_eq!(
         job_metadata["learning_context"]["selected_learning_entry_ids"],
         serde_json::json!(["learn-pipe"])
@@ -1341,7 +1459,7 @@ async fn chapter_pipeline_runs_context_extension_hooks_and_persists_trace() {
                     "after_review".to_string(),
                     "export_target".to_string(),
                 ],
-                package_kinds: vec!["context_rule_pack".to_string()],
+                package_kinds: vec!["context_rule_pack".to_string(), "prompt_pack".to_string()],
                 metadata: serde_json::json!({}),
             },
             enabled: true,
@@ -1349,26 +1467,47 @@ async fn chapter_pipeline_runs_context_extension_hooks_and_persists_trace() {
                 tauri_app_lib::extensions::host::ExtensionContribution {
                     hook: "before_context_build".to_string(),
                     required_permission: Some("project_read".to_string()),
+                    package_kind: None,
+                    contribution_id: None,
+                    payload: serde_json::json!(null),
                     metadata_patch: serde_json::json!({"before_context_extension": true}),
                 },
                 tauri_app_lib::extensions::host::ExtensionContribution {
                     hook: "after_context_build".to_string(),
                     required_permission: Some("project_read".to_string()),
+                    package_kind: Some("prompt_pack".to_string()),
+                    contribution_id: Some("pipeline-prompt-style".to_string()),
+                    payload: serde_json::json!({
+                        "unit_identifier": "extension.pipeline_prompt_style",
+                        "role": "system",
+                        "order": 15,
+                        "generation_phase": "draft",
+                        "content": "EXTENSION PROMPT STYLE: keep the rain ticket motif visible."
+                    }),
                     metadata_patch: serde_json::json!({"after_context_extension": true}),
                 },
                 tauri_app_lib::extensions::host::ExtensionContribution {
                     hook: "before_review".to_string(),
                     required_permission: Some("project_read".to_string()),
+                    package_kind: None,
+                    contribution_id: None,
+                    payload: serde_json::json!(null),
                     metadata_patch: serde_json::json!({"before_review_extension": true}),
                 },
                 tauri_app_lib::extensions::host::ExtensionContribution {
                     hook: "after_review".to_string(),
                     required_permission: Some("project_read".to_string()),
+                    package_kind: None,
+                    contribution_id: None,
+                    payload: serde_json::json!(null),
                     metadata_patch: serde_json::json!({"after_review_extension": true}),
                 },
                 tauri_app_lib::extensions::host::ExtensionContribution {
                     hook: "export_target".to_string(),
                     required_permission: Some("project_read".to_string()),
+                    package_kind: None,
+                    contribution_id: None,
+                    payload: serde_json::json!(null),
                     metadata_patch: serde_json::json!({"export_extension": true}),
                 },
             ],
@@ -1418,6 +1557,18 @@ async fn chapter_pipeline_runs_context_extension_hooks_and_persists_trace() {
             && hook["events"][0]["status"] == "applied"
             && hook["workflow_metadata"]["after_context_extension"] == true
     }));
+    assert!(hooks.iter().any(|hook| {
+        hook["hook"] == "after_context_build"
+            && hook["workflow_metadata"]["extension_contributions"]["prompt_pack"][0]
+                ["contribution_id"]
+                == "pipeline-prompt-style"
+    }));
+    assert!(provider
+        .systems
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|prompt| prompt.contains("EXTENSION PROMPT STYLE")));
     assert!(hooks.iter().any(|hook| {
         hook["hook"] == "before_review"
             && hook["workflow_metadata"]["before_review_extension"] == true

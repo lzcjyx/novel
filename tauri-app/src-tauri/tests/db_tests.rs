@@ -287,6 +287,98 @@ fn migrations_expand_generation_job_status_check_for_cancelled() {
 }
 
 #[test]
+fn migrations_repair_chapter_version_temp_foreign_keys_before_project_delete() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("broken-chapter-version-fk.db");
+    let db = Database::open(&db_path).unwrap();
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+    let project_id = tauri_app_lib::db::projects::create_project(
+        &db,
+        "Broken FK",
+        None,
+        Some("mystery"),
+        None,
+        Some("adult"),
+        Some("quiet"),
+        Some("quiet"),
+        Some(100000),
+        Some(1000),
+    )
+    .unwrap()
+    .id;
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapters (id, project_id, sequence, title, status)
+             VALUES ('chapter-broken-fk', ?1, 1, 'Broken FK', 'draft')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chapter_versions
+                (id, chapter_id, project_id, version_number, version_type)
+             VALUES
+                ('version-broken-fk', 'chapter-broken-fk', ?1, 1, 'accepted_candidate')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_reviews
+                (id, project_id, chapter_id, chapter_version_id, agent_name)
+             VALUES
+                ('review-broken-fk', ?1, 'chapter-broken-fk', 'version-broken-fk', 'continuity')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE agent_reviews RENAME TO agent_reviews_clean;
+            CREATE TABLE agent_reviews (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+                chapter_version_id TEXT REFERENCES chapter_versions_old_type_migration(id) ON DELETE SET NULL,
+                agent_name TEXT,
+                score INTEGER,
+                pass INTEGER,
+                blocking_issues TEXT NOT NULL DEFAULT '[]',
+                minor_issues TEXT NOT NULL DEFAULT '[]',
+                recommendations TEXT NOT NULL DEFAULT '[]',
+                raw_output TEXT NOT NULL DEFAULT '{}',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO agent_reviews
+                (id, project_id, chapter_id, chapter_version_id, agent_name, score, pass,
+                 blocking_issues, minor_issues, recommendations, raw_output, metadata)
+            SELECT id, project_id, chapter_id, chapter_version_id, agent_name, score, pass,
+                   blocking_issues, minor_issues, recommendations, raw_output, metadata
+            FROM agent_reviews_clean;
+            DROP TABLE agent_reviews_clean;
+            PRAGMA foreign_keys = ON;
+            ",
+        )
+        .unwrap();
+    }
+
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+
+    let repaired_sql: String = {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_reviews'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(repaired_sql.contains("REFERENCES chapter_versions(id)"));
+    assert!(!repaired_sql.contains("chapter_versions_old_type_migration"));
+
+    tauri_app_lib::db::projects::delete_project(&db, &project_id).unwrap();
+}
+
+#[test]
 fn settings_round_trip_pet_preferences() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("pet-settings.db");

@@ -24,6 +24,7 @@ fn runtime_commands_are_registered_from_domain_module() {
         "run_operator_recipe",
         "select_draft_candidate",
         "import_extension_package",
+        "get_author_memory_banks",
     ] {
         assert!(
             lib_source.contains(&format!("commands::runtime::{command}")),

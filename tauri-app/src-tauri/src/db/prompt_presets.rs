@@ -1,6 +1,8 @@
 use crate::db::connection::Database;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptPresetInput {
@@ -20,6 +22,17 @@ pub struct PromptPreset {
     pub scope: String,
     pub is_builtin: bool,
     pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptPresetSnapshot {
+    pub id: String,
+    pub preset_id: String,
+    pub version: i32,
+    pub prompt_hash: String,
+    pub note: Option<String>,
+    pub package: PromptPresetPackage,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +77,12 @@ fn metadata_to_string(metadata: &serde_json::Value) -> Result<String, String> {
 
 fn parse_metadata(raw: String) -> serde_json::Value {
     serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn prompt_package_hash(package_json: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(package_json.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 pub fn upsert_prompt_preset(db: &Database, input: &PromptPresetInput) -> Result<String, String> {
@@ -294,4 +313,208 @@ pub fn import_prompt_preset_package(
     tx.commit()
         .map_err(|e| format!("Commit prompt preset import: {}", e))?;
     Ok(package.id.clone())
+}
+
+pub fn create_prompt_preset_snapshot(
+    db: &Database,
+    preset_id: &str,
+    note: Option<&str>,
+) -> Result<PromptPresetSnapshot, String> {
+    let package = export_prompt_preset_package(db, preset_id)?;
+    let package_json = serde_json::to_string(&package)
+        .map_err(|e| format!("Serialize prompt preset snapshot: {}", e))?;
+    let prompt_hash = prompt_package_hash(&package_json);
+    let id = Database::new_uuid();
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let version = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM prompt_preset_snapshots WHERE preset_id = ?1",
+            params![preset_id],
+            |row| row.get::<_, i32>(0),
+        )
+        .map_err(|e| format!("Next prompt preset snapshot version: {}", e))?;
+    conn.execute(
+        "INSERT INTO prompt_preset_snapshots
+            (id, preset_id, version, prompt_hash, note, package_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, preset_id, version, prompt_hash, note, package_json],
+    )
+    .map_err(|e| format!("Create prompt preset snapshot: {}", e))?;
+    let created_at = conn
+        .query_row(
+            "SELECT created_at FROM prompt_preset_snapshots WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("Load prompt preset snapshot timestamp: {}", e))?;
+    Ok(PromptPresetSnapshot {
+        id,
+        preset_id: preset_id.to_string(),
+        version,
+        prompt_hash,
+        note: note.map(str::to_string),
+        package,
+        created_at,
+    })
+}
+
+pub fn list_prompt_preset_snapshots(
+    db: &Database,
+    preset_id: &str,
+) -> Result<Vec<PromptPresetSnapshot>, String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, preset_id, version, prompt_hash, note, package_json, created_at
+             FROM prompt_preset_snapshots
+             WHERE preset_id = ?1
+             ORDER BY version ASC",
+        )
+        .map_err(|e| format!("Prepare prompt preset snapshots: {}", e))?;
+    let snapshots = stmt
+        .query_map(params![preset_id], |row| {
+            let package_json: String = row.get(5)?;
+            let package =
+                serde_json::from_str::<PromptPresetPackage>(&package_json).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+            Ok(PromptPresetSnapshot {
+                id: row.get(0)?,
+                preset_id: row.get(1)?,
+                version: row.get(2)?,
+                prompt_hash: row.get(3)?,
+                note: row.get(4)?,
+                package,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| format!("Query prompt preset snapshots: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect prompt preset snapshots: {}", e))?;
+    Ok(snapshots)
+}
+
+pub fn clone_prompt_preset(
+    db: &Database,
+    source_preset_id: &str,
+    new_id: Option<String>,
+    new_name: &str,
+) -> Result<String, String> {
+    if new_name.trim().is_empty() {
+        return Err("Cloned prompt preset name is required".to_string());
+    }
+    let mut package = export_prompt_preset_package(db, source_preset_id)?;
+    let cloned_id = new_id.unwrap_or_else(Database::new_uuid);
+    let mut metadata = package.metadata;
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    metadata["cloned_from"] = serde_json::json!(package.id);
+    metadata["clone_source_builtin"] = serde_json::json!(package.is_builtin);
+    package.id = cloned_id.clone();
+    package.name = new_name.to_string();
+    package.is_builtin = false;
+    package.metadata = metadata;
+    import_prompt_preset_package(db, &package)?;
+    Ok(cloned_id)
+}
+
+pub fn dry_run_prompt_preset(
+    db: &Database,
+    preset_id: &str,
+    generation_phase: &str,
+    temporary_overrides: HashMap<String, String>,
+) -> Result<crate::workflow::prompt_runtime::AssembledPrompt, String> {
+    let package = export_prompt_preset_package(db, preset_id)?;
+    let units = package
+        .units
+        .into_iter()
+        .map(prompt_package_unit_to_runtime_unit)
+        .collect::<Vec<_>>();
+    let vars = prompt_default_vars_from_units(&units)
+        .into_iter()
+        .chain(temporary_overrides)
+        .collect::<HashMap<_, _>>();
+    crate::workflow::prompt_runtime::assemble_prompt_runtime(
+        crate::workflow::prompt_runtime::PromptRuntimeRequest {
+            prompt_name: package.name,
+            generation_phase: generation_phase.to_string(),
+            vars,
+            units,
+        },
+    )
+}
+
+fn prompt_package_unit_to_runtime_unit(
+    unit: PromptPresetUnitPackage,
+) -> crate::workflow::prompt_runtime::PromptUnit {
+    let content = append_few_shot_examples(&unit.content, &unit.metadata);
+    crate::workflow::prompt_runtime::PromptUnit {
+        identifier: unit.identifier,
+        role: unit.role,
+        order: unit.order,
+        enabled: unit.enabled,
+        injection_position: unit.injection_position,
+        generation_phase: unit.generation_phase,
+        content,
+        metadata: unit.metadata,
+    }
+}
+
+fn prompt_default_vars_from_units(
+    units: &[crate::workflow::prompt_runtime::PromptUnit],
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    for unit in units {
+        if let Some(parameters) = unit
+            .metadata
+            .get("parameters")
+            .and_then(|value| value.as_object())
+        {
+            for (key, spec) in parameters {
+                if let Some(default) = spec.get("default").and_then(|value| value.as_str()) {
+                    vars.entry(key.clone())
+                        .or_insert_with(|| default.to_string());
+                }
+            }
+        }
+    }
+    vars
+}
+
+fn append_few_shot_examples(content: &str, metadata: &serde_json::Value) -> String {
+    let Some(examples) = metadata
+        .get("few_shot_examples")
+        .and_then(|value| value.as_array())
+    else {
+        return content.to_string();
+    };
+    if examples.is_empty() {
+        return content.to_string();
+    }
+    let mut rendered = content.to_string();
+    rendered.push_str("\n\nFew-shot examples:");
+    for example in examples {
+        let label = example
+            .get("label")
+            .and_then(|value| value.as_str())
+            .unwrap_or("example");
+        let input = example
+            .get("input")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        let output = example
+            .get("output")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        rendered.push_str(&format!(
+            "\n- {} input: {}\n  output: {}",
+            label, input, output
+        ));
+    }
+    rendered
 }

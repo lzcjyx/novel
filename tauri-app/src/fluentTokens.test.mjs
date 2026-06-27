@@ -43,9 +43,9 @@ test("tauri window uses a custom Fluent titlebar instead of native decorations",
   assert.match(app, /className="app-shell"/);
   assert.match(app, /className="app-titlebar"/);
   assert.match(app, /data-tauri-drag-region/);
-  assert.match(app, /aria-label="Minimize window"/);
-  assert.match(app, /aria-label="Maximize or restore window"/);
-  assert.match(app, /aria-label="Close to tray"/);
+  assert.match(app, /aria-label="最小化窗口"/);
+  assert.match(app, /aria-label="最大化或还原窗口"/);
+  assert.match(app, /aria-label="隐藏到托盘"/);
   assert.match(app, /\.hide\(\)/);
   assert.doesNotMatch(app, /[\u{1F300}-\u{1FAFF}]/u);
 });
@@ -75,10 +75,12 @@ test("custom titlebar has Tauri window permissions and does not make controls dr
 });
 
 test("graph nodes render compact canvas content while preserving labels off-canvas", () => {
-  assert.match(app, /const graphNodeInitial/);
-  assert.match(app, /className="graph-node-initial"/);
+  assert.match(app, /graphTypeLabel/);
+  assert.match(app, /graphNodeDisplayLabel/);
+  assert.match(app, /className="graph-node-type"/);
+  assert.match(app, /className="graph-node-label"/);
   assert.match(app, /className="graph-node-degree"/);
-  assert.doesNotMatch(app, /<span>\{node\.label\}<\/span>/);
+  assert.match(app, /<span className="graph-node-label">\{graphNodeDisplayLabel\(node\.label\)\}<\/span>/);
   assert.match(app, /title=\{\`\$\{node\.label\}/);
   assert.match(app, /aria-label=\{\`\$\{node\.label\}/);
 });
@@ -88,9 +90,18 @@ test("graph workbench uses light Fluent graph tokens", () => {
   assert.match(css, /\.graph-edge-base\s*\{[\s\S]*rgba\(0,\s*0,\s*0,\s*0\.\d+\)/);
   assert.match(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*var\(--accent\)/);
   assert.match(css, /\.graph-node\s*\{[\s\S]*var\(--control-fill\)/);
-  assert.match(css, /\.graph-node-initial/);
+  assert.match(css, /\.graph-node-type/);
+  assert.match(css, /\.graph-node-label/);
   assert.match(css, /\.graph-node-degree/);
   assert.doesNotMatch(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*208,\s*168,\s*92/);
+});
+
+test("top-level shell uses Chinese-first navigation and status copy", () => {
+  for (const label of ["仪表盘", "项目", "章节", "章节计划", "审稿", "任务", "小说圣经", "关系图谱", "运行台", "作者控制", "学习库", "设置"]) {
+    assert.ok(app.includes(label), `missing Chinese nav label ${label}`);
+  }
+  assert.match(app, /生成中/);
+  assert.match(app, /就绪/);
 });
 
 test("desktop pet is configurable and status aware without canvas animation", () => {

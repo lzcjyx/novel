@@ -3,9 +3,10 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 
 use crate::db::connection::Database;
+use crate::db::hard_facts::HardFact;
 use crate::db::vector_store::RetrievalTrace;
 use crate::models::{AppSettings, BibleData, ChapterPlan, LearningEntry, Project, VectorDocument};
-use crate::workflow::context_activation::ContextActivationTrace;
+use crate::workflow::context_activation::{ContextActivationTrace, ContextSourceTrace};
 
 pub const GRAPH_CONTEXT_MAX_HOPS: usize = 2;
 pub const GRAPH_CONTEXT_MAX_NEIGHBORS: usize = 12;
@@ -18,6 +19,10 @@ pub struct OperatorControls {
     pub must_include_beats: Option<String>,
     pub forbidden_moves: Option<String>,
     pub style_emphasis: Option<String>,
+    #[serde(default)]
+    pub pinned_source_keys: Vec<String>,
+    #[serde(default)]
+    pub unpinned_source_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +33,7 @@ pub struct WritingContextPackage {
     pub canon: serde_json::Value,
     pub graph_context: GraphContext,
     pub context_activation: ContextActivationTrace,
+    pub hard_facts: Vec<HardFact>,
     pub retrieval: Vec<VectorDocument>,
     pub retrieval_trace: RetrievalTrace,
     pub style: serde_json::Value,
@@ -358,15 +364,86 @@ pub fn build_writing_context(
         .collect::<Vec<_>>();
 
     let graph_context = build_graph_context(db, &project.id, plan).unwrap_or_default();
-    let context_activation = crate::workflow::context_activation::activate_context_rules(
+    let mut context_activation = crate::workflow::context_activation::activate_context_rules(
         db,
         &project.id,
         plan,
         Some(&controls),
     )
     .unwrap_or_default();
+    for entry in &learned_patterns {
+        let source_key = format!("learning_entry:{}", entry.id);
+        if !context_activation.source_keys.contains(&source_key) {
+            context_activation.source_keys.push(source_key.clone());
+        }
+        context_activation.source_trace.push(ContextSourceTrace {
+            source_key,
+            source_type: "learning_entry".to_string(),
+            source_id: entry.id.clone(),
+            reason: "learning_entry_selection".to_string(),
+            label: entry.pattern_name.clone(),
+        });
+    }
+    let hard_facts = crate::workflow::hard_fact_ledger::select_relevant_hard_facts(
+        db,
+        &project.id,
+        plan,
+        Some(&controls),
+        12,
+    )
+    .unwrap_or_default();
+    for fact in &hard_facts {
+        let source_key = format!("hard_fact:{}", fact.id);
+        if !context_activation.source_keys.contains(&source_key) {
+            context_activation.source_keys.push(source_key.clone());
+        }
+        context_activation.source_trace.push(ContextSourceTrace {
+            source_key,
+            source_type: "hard_fact".to_string(),
+            source_id: fact.id.clone(),
+            reason: "hard_fact_relevance".to_string(),
+            label: format!("{} {} {}", fact.subject, fact.predicate, fact.object),
+        });
+    }
     let retrieval = rerank_retrieval_with_graph_context(retrieval, &graph_context);
     let retrieval_trace = crate::db::vector_store::build_retrieval_trace(&retrieval);
+    let context_compression_summaries =
+        crate::db::context_compression::list_context_compression_summaries(db, &project.id, true)
+            .unwrap_or_default();
+    for summary in &context_compression_summaries {
+        let source_key = format!("context_compression:{}", summary.id);
+        if !context_activation.source_keys.contains(&source_key) {
+            context_activation.source_keys.push(source_key.clone());
+        }
+        context_activation.source_trace.push(ContextSourceTrace {
+            source_key,
+            source_type: "context_compression".to_string(),
+            source_id: summary.id.clone(),
+            reason: "approved_context_compression".to_string(),
+            label: summary.summary_text.chars().take(80).collect::<String>(),
+        });
+    }
+    let style_assets = crate::workflow::style_assets::compile_style_assets(
+        db,
+        &project.id,
+        crate::workflow::style_assets::StyleAssetScope::Project,
+    )
+    .ok();
+    if let Some(style_assets) = &style_assets {
+        for asset_id in &style_assets.asset_ids {
+            let source_key = format!("style_asset:{}", asset_id);
+            if !context_activation.source_keys.contains(&source_key) {
+                context_activation.source_keys.push(source_key.clone());
+            }
+            context_activation.source_trace.push(ContextSourceTrace {
+                source_key,
+                source_type: "style_asset".to_string(),
+                source_id: asset_id.clone(),
+                reason: "style_asset_enabled".to_string(),
+                label: asset_id.clone(),
+            });
+        }
+    }
 
     Ok(WritingContextPackage {
         project: json!({
@@ -394,6 +471,7 @@ pub fn build_writing_context(
             "previous_ending_hook": previous_ending_hook,
             "timeline_events": &canon.timeline_events,
             "character_states": character_states,
+            "context_compression_summaries": context_compression_summaries,
         }),
         canon: json!({
             "characters": &canon.characters,
@@ -408,11 +486,13 @@ pub fn build_writing_context(
         }),
         graph_context,
         context_activation,
+        hard_facts,
         retrieval,
         retrieval_trace,
         style: json!({
             "project_style_profile": project.style_profile,
             "style_guides": &canon.style_guides,
+            "style_assets": style_assets,
         }),
         learned_patterns,
         learning_entry_context_ids,

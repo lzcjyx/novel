@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, createContext, useContext, useRef, us
 import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
+import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, graphNodeBadge, graphNodeDisplayLabel, graphTypeLabel, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
 import { tauriClient } from "./lib/tauriClient";
+import { AuthorControlPage } from "./pages/AuthorControlPage";
 import { PetWindow } from "./pages/PetWindow";
 import { RuntimePage } from "./pages/RuntimePage";
 
@@ -30,7 +31,7 @@ interface StatusResponse { ok: boolean; novel?: { name: string; genre?: string; 
 interface BibleData { characters: any[]; locations: any[]; organizations: any[]; items: any[]; world_lore: any[]; magic_systems: any[]; canon_rules: any[]; plot_threads: any[]; foreshadowing: any[]; style_guides: any[]; timeline_events: any[]; }
 interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; pet_enabled: boolean; pet_animation_level: string; pet_compact_mode: boolean; pet_position_x: number; pet_position_y: number; }
 interface Project { id: string; name: string; }
-interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; }
+interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; pinned_source_keys?: string[]; unpinned_source_keys?: string[]; }
 type NullableNumber = number | null | undefined;
 
 interface RetrievalSource { rank: number; document_id: string; source_type: string; source_id?: string; title?: string; excerpt: string; similarity?: NullableNumber; relevance_label: string; metadata: string; }
@@ -140,8 +141,8 @@ function App() {
   const ctx = { projects, selected, setSelected, settings, refreshSettings, status, logs, loading, setLoading, msg, setMsg };
 
   const navLabels: Record<string, string> = {
-    dashboard: "Dashboard", projects: "Projects", chapters: "Chapters",
-    plans: "Plans", reviews: "Reviews", jobs: "Jobs", bible: "Bible", graph: "Graph", runtime: "Runtime", learn: "Learn", settings: "Settings",
+    dashboard: "仪表盘", projects: "项目", chapters: "章节",
+    plans: "章节计划", reviews: "审稿", jobs: "任务", bible: "小说圣经", graph: "关系图谱", runtime: "运行台", authorControl: "作者控制", learn: "学习库", settings: "设置",
   };
   const navIcon: Record<string, string> = {
     dashboard: "D",
@@ -153,6 +154,7 @@ function App() {
     bible: "B",
     graph: "G",
     runtime: "T",
+    authorControl: "A",
     learn: "K",
     settings: "S",
   };
@@ -194,6 +196,7 @@ function App() {
       case "bible": return <BiblePage />;
       case "graph": return <KnowledgeGraphPage />;
       case "runtime": return <RuntimePage selected={selected} settings={settings} refreshSettings={refreshSettings} />;
+      case "authorControl": return <AuthorControlPage selected={selected} />;
       case "learn": return <LearnPage />;
       case "settings": return <SettingsPage refreshSettings={refreshSettings} />;
       default: return <Dashboard />;
@@ -233,13 +236,13 @@ function App() {
             </div>
           </div>
           <div className="window-controls">
-            <button type="button" className="window-control" aria-label="Minimize window" onClick={handleMinimizeWindow}>
+            <button type="button" className="window-control" aria-label="最小化窗口" onClick={handleMinimizeWindow}>
               <span className="window-glyph window-glyph-minimize" aria-hidden="true" />
             </button>
-            <button type="button" className="window-control" aria-label="Maximize or restore window" onClick={handleToggleMaximizeWindow}>
+            <button type="button" className="window-control" aria-label="最大化或还原窗口" onClick={handleToggleMaximizeWindow}>
               <span className="window-glyph window-glyph-maximize" aria-hidden="true" />
             </button>
-            <button type="button" className="window-control window-control-close" aria-label="Close to tray" onClick={handleCloseToTray}>
+            <button type="button" className="window-control window-control-close" aria-label="隐藏到托盘" onClick={handleCloseToTray}>
               <span className="window-glyph window-glyph-close" aria-hidden="true" />
             </button>
           </div>
@@ -253,8 +256,8 @@ function App() {
                 <span>{navLabels[p]}</span>
               </button>
             ))}
-            <select className="sidebar-select navigation-project-select" value={selected} onChange={e => setSelected(e.target.value)} aria-label="Selected project">
-              <option value="">-- Select Project --</option>
+            <select className="sidebar-select navigation-project-select" value={selected} onChange={e => setSelected(e.target.value)} aria-label="当前项目">
+              <option value="">-- 选择项目 --</option>
               {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </aside>
@@ -262,11 +265,11 @@ function App() {
             <div className="app-command-bar">
               <div className="command-context">
                 <span className="command-kicker">{navLabels[page]}</span>
-                <strong>{selectedProject?.name || "No project selected"}</strong>
+                <strong>{selectedProject?.name || "未选择项目"}</strong>
               </div>
               <div className="info-bar" data-state={status?.is_running ? "running" : "ready"} role="status">
                 <span className="info-dot" aria-hidden="true" />
-                <span>{status?.is_running ? "Generation running" : "Ready"}</span>
+                <span>{status?.is_running ? "生成中" : "就绪"}</span>
               </div>
             </div>
             <main className="app-main">
@@ -316,7 +319,7 @@ function Dashboard() {
       const ev = event.payload as PipelineStep;
       if (ev.preview_text) {
         setLivePreview({
-          title: ev.preview_title || "Untitled",
+          title: ev.preview_title || "未命名",
           text: ev.preview_text,
           kind: ev.preview_kind || "preview",
         });
@@ -366,7 +369,7 @@ function Dashboard() {
       timestamp: new Date().toISOString(),
       preview: false,
     }]);
-    setProgress("Starting...");
+    setProgress("启动中...");
   }, [loading]);
 
   useEffect(() => {
@@ -423,7 +426,7 @@ function Dashboard() {
       setContextPreview(preview);
     } catch (e) {
       setContextPreview(null);
-      setPreviewMsg("Error: " + e);
+      setPreviewMsg("错误：" + e);
     }
     setPreviewLoading(false);
   };
@@ -460,7 +463,7 @@ function Dashboard() {
       );
       setMsg(r.message);
       await loadPreview();
-    } catch (e) { setMsg("Error: " + e); }
+    } catch (e) { setMsg("错误：" + e); }
     setLoading(false);
   };
 
@@ -470,7 +473,7 @@ function Dashboard() {
       const r = await tauriClient.runWeeklyArcPlanner<GenerationResult>(selected);
       setMsg(r.message);
       await loadPreview();
-    } catch (e) { setMsg("Error: " + e); }
+    } catch (e) { setMsg("错误：" + e); }
     setLoading(false);
   };
 
@@ -496,16 +499,16 @@ function Dashboard() {
           <div style={{ fontSize: 14, fontWeight: 400, marginTop: 8, opacity: 0.8 }}>{selNovel.genre}</div>
         </div>
       )}
-      <h2 className="page-title" style={selNovel ? undefined : {}}>{selNovel ? "" : "Dashboard"}</h2>
+      <h2 className="page-title" style={selNovel ? undefined : {}}>{selNovel ? "" : "仪表盘"}</h2>
 
       <div className="status-grid">
         {[
-          {l:"Chapters",v:status?.chapter_count ?? "?"},
-          {l:"Today",v:status?.chapters_today ?? "?"},
-          {l:"Plans Left",v:status?.plans_left ?? "?"},
-          {l:"Total Words",v:(status?.total_words||0).toLocaleString()},
-          {l:"Status",v: loading ? "RUNNING" : (status?.is_running ? "RUNNING" : "IDLE"), badge: true},
-          {l:"RAG",v: settings?.embedding_provider && settings.embedding_provider !== "none" ? "ON" : "OFF"},
+          {l:"章节",v:status?.chapter_count ?? "?"},
+          {l:"今日",v:status?.chapters_today ?? "?"},
+          {l:"剩余计划",v:status?.plans_left ?? "?"},
+          {l:"总字数",v:(status?.total_words||0).toLocaleString()},
+          {l:"状态",v: loading ? "生成中" : (status?.is_running ? "生成中" : "待命"), badge: true},
+          {l:"RAG",v: settings?.embedding_provider && settings.embedding_provider !== "none" ? "开启" : "关闭"},
         ].map((s,i) => (
           <div key={i} className="status-card">
             <div className="status-label">{s.l}</div>
@@ -517,7 +520,7 @@ function Dashboard() {
       <div className="writer-console">
         <section className="writer-panel">
           <div className="panel-heading">
-            <h3 className="section-title">Chapter Controls</h3>
+            <h3 className="section-title">章节控制</h3>
           </div>
           <div className="mode-segments">
             {modes.map(mode => (
@@ -550,37 +553,37 @@ function Dashboard() {
             </label>
           </div>
           <div className="action-row">
-            <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>Write With Controls</button>
-            <button className="btn btn-secondary" onClick={handleWeekly} disabled={loading || !selected}>Generate Weekly Plan</button>
-            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await tauriClient.resetRunning(selected); }}>Reset Stuck Job</button>}
+            <button className="btn btn-primary" onClick={handleWrite} disabled={loading || !selected}>按控制写作</button>
+            <button className="btn btn-secondary" onClick={handleWeekly} disabled={loading || !selected}>生成周计划</button>
+            {(status?.is_running && !loading) && <button className="btn btn-reset" onClick={async () => { await tauriClient.resetRunning(selected); }}>重置卡住的任务</button>}
           </div>
         </section>
 
         <section className="writer-panel context-panel">
           <div className="panel-heading">
-            <h3 className="section-title">Context Preview</h3>
-            <button className="btn btn-sm btn-secondary" onClick={loadPreview} disabled={!selected || previewLoading}>{previewLoading ? "Refreshing" : "Refresh"}</button>
+            <h3 className="section-title">上下文预览</h3>
+            <button className="btn btn-sm btn-secondary" onClick={loadPreview} disabled={!selected || previewLoading}>{previewLoading ? "刷新中" : "刷新"}</button>
           </div>
           {contextPreview ? (
             <>
               <div className="next-plan">
-                <div className="status-label">Next Chapter</div>
-                <div className="chapter-title">Ch.{plan.sequence ?? "?"} — {plan.title || "Untitled"}</div>
-                <div className="text-body">{plan.outline || "No outline"}</div>
+                <div className="status-label">下一章</div>
+                <div className="chapter-title">第 {plan.sequence ?? "?"} 章 — {plan.title || "未命名"}</div>
+                <div className="text-body">{plan.outline || "暂无大纲"}</div>
               </div>
               <div className="context-stats">
-                <div><strong>{canon.characters?.length || 0}</strong><span>Characters</span></div>
-                <div><strong>{canon.active_plot_threads?.length || 0}</strong><span>Threads</span></div>
-                <div><strong>{canon.unresolved_foreshadowing?.length || 0}</strong><span>Foreshadowing</span></div>
-                <div><strong>{graphNeighbors.length}</strong><span>Graph Links</span></div>
-                <div><strong>{retrievalTrace?.source_count || 0}</strong><span>RAG Sources</span></div>
-                <div><strong>{activatedRules.length}</strong><span>Rules</span></div>
+                <div><strong>{canon.characters?.length || 0}</strong><span>人物</span></div>
+                <div><strong>{canon.active_plot_threads?.length || 0}</strong><span>剧情线</span></div>
+                <div><strong>{canon.unresolved_foreshadowing?.length || 0}</strong><span>伏笔</span></div>
+                <div><strong>{graphNeighbors.length}</strong><span>图谱连接</span></div>
+                <div><strong>{retrievalTrace?.source_count || 0}</strong><span>RAG 来源</span></div>
+                <div><strong>{activatedRules.length}</strong><span>规则</span></div>
               </div>
               {promptRuntime && (
                 <div className="prompt-runtime-preview">
                   <div className="prompt-runtime-head">
                     <div>
-                      <div className="status-label">Prompt Runtime</div>
+                      <div className="status-label">提示词运行时</div>
                       <strong>{promptRuntime.prompt_name} / {promptRuntime.generation_phase}</strong>
                     </div>
                     <span>{promptRuntime.token_estimate.toLocaleString()} tokens</span>
@@ -593,24 +596,24 @@ function Dashboard() {
                     ))}
                   </div>
                   <details className="prompt-runtime-details">
-                    <summary>System Prompt</summary>
+                    <summary>系统提示词</summary>
                     <pre>{promptRuntime.system_prompt}</pre>
                   </details>
                   <details className="prompt-runtime-details">
-                    <summary>User Prompt</summary>
+                    <summary>用户提示词</summary>
                     <pre>{promptRuntime.user_prompt}</pre>
                   </details>
                 </div>
               )}
               {continuity.previous_ending_hook && (
                 <div className="context-slice">
-                  <div className="status-label">Previous Hook</div>
+                  <div className="status-label">上一章钩子</div>
                   <p>{continuity.previous_ending_hook}</p>
                 </div>
               )}
               {activatedRules.length > 0 && (
                 <div className="activation-rule-list">
-                  <div className="status-label">Activated Canon Rules</div>
+                  <div className="status-label">已激活圣经规则</div>
                   {activatedRules.slice(0, 5).map(rule => (
                     <div className="activation-rule-row" key={rule.rule_id}>
                       <div>
@@ -625,7 +628,7 @@ function Dashboard() {
               )}
               {graphNeighbors.length > 0 && (
                 <div className="graph-context-strip">
-                  <div className="status-label">Graph Context</div>
+                  <div className="status-label">图谱上下文</div>
                   {graphContext?.summary && <p className="graph-context-summary">{graphContext.summary}</p>}
                   <div className="graph-context-links">
                     {graphNeighbors.slice(0, 6).map((neighbor, idx) => (
@@ -638,7 +641,7 @@ function Dashboard() {
               )}
               {ragSources.length > 0 && (
                 <div className="rag-source-list">
-                  <div className="status-label">RAG Sources</div>
+                  <div className="status-label">RAG 来源</div>
                   {ragSources.slice(0, 5).map(source => (
                     <div className="rag-source-row" key={source.document_id}>
                       <div className="rag-source-rank">{source.rank}</div>
@@ -661,7 +664,7 @@ function Dashboard() {
               )}
             </>
           ) : (
-            <div className={`msg-banner ${previewMsg.startsWith("Error") ? "msg-error" : "msg-success"}`}>{previewMsg || "No context loaded"}</div>
+            <div className={`msg-banner ${previewMsg.startsWith("错误") ? "msg-error" : "msg-success"}`}>{previewMsg || "尚未加载上下文"}</div>
           )}
         </section>
       </div>
@@ -670,7 +673,7 @@ function Dashboard() {
         <section className="live-workbench">
           <div className="live-status">
             <div>
-              <div className="status-label">Live Writer</div>
+              <div className="status-label">实时写作</div>
               <div className="live-phase">{latestPhase ? (pipelineLabels[latestPhase.step] || latestPhase.step) : (loading ? "准备生成" : "等待任务")}</div>
             </div>
             <div className={`live-pulse ${loading ? "active" : ""}`} />
@@ -689,11 +692,11 @@ function Dashboard() {
               );
             })}
           </div>
-          <div className="live-progress">{progress || (loading ? "Starting..." : "Idle")}</div>
+          <div className="live-progress">{progress || (loading ? "启动中..." : "待命")}</div>
           <div className="live-progress-feed">
             <div className="live-feed-head">
-              <span>Live Progress Feed</span>
-              <strong>{progressFeed.length ? `${progressFeed[progressFeed.length - 1].percent}%` : "Idle"}</strong>
+              <span>实时进度</span>
+              <strong>{progressFeed.length ? `${progressFeed[progressFeed.length - 1].percent}%` : "待命"}</strong>
             </div>
             <div className="live-feed-lines" ref={liveProgressRef} role="log" aria-live="polite">
               {progressFeed.length > 0 ? progressFeed.map(entry => (
@@ -704,14 +707,14 @@ function Dashboard() {
                   <p>{entry.detail}</p>
                 </div>
               )) : (
-                <div className="live-feed-empty">Start chapter generation to stream progress here.</div>
+                <div className="live-feed-empty">开始章节生成后，这里会显示实时进度。</div>
               )}
             </div>
           </div>
           <div className="live-writer-preview">
             <div className="live-preview-head">
-              <span>{livePreview ? `${livePreview.kind} preview` : "Draft preview"}</span>
-              <strong>{livePreview?.title || "No preview yet"}</strong>
+              <span>{livePreview ? `${livePreview.kind} 预览` : "草稿预览"}</span>
+              <strong>{livePreview?.title || "暂无预览"}</strong>
             </div>
             <div className="live-preview-body">
               {visiblePreview || (loading ? "等待模型返回正文预览..." : "开始写作后这里会显示本章正文预览。")}
@@ -720,10 +723,10 @@ function Dashboard() {
           </div>
         </section>
       )}
-      {msg && <div className={`msg-banner ${msg.toLowerCase().includes("error") ? "msg-error" : "msg-success"}`}>{msg}</div>}
+      {msg && <div className={`msg-banner ${msg.toLowerCase().includes("error") || msg.includes("错误") ? "msg-error" : "msg-success"}`}>{msg}</div>}
 
       <div style={{ marginTop: 24 }}>
-        <h3 className="section-title">Recent Logs</h3>
+        <h3 className="section-title">最近日志</h3>
         <div className="card">
           {logs.slice(-20).map((l,i) => <div key={i} className="log-line">{l}</div>)}
         </div>
@@ -736,10 +739,10 @@ function Dashboard() {
 function ProjectList({ refresh }: { refresh: () => void }) {
   const { projects, setSelected, setLoading, setMsg } = useApp();
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: "My Novel", genre: "fantasy", targetAudience: "", tone: "热血", description: "" });
+  const [form, setForm] = useState({ name: "我的小说", genre: "fantasy", targetAudience: "", tone: "热血", description: "" });
 
   const handleCreate = async () => {
-    setLoading(true); setMsg("Generating novel bible via AI... (may take 30-60s)");
+    setLoading(true); setMsg("正在通过 AI 生成小说圣经...（可能需要 30-60 秒）");
     setShowCreate(false);
     try {
       const result = await invoke<Project>("create_project", {
@@ -753,42 +756,42 @@ function ProjectList({ refresh }: { refresh: () => void }) {
       });
       await refresh();
       setSelected(result.id);
-      setMsg(`Novel "${result.name}" created! Switch to Bible/Plans tabs.`);
-    } catch (e) { setMsg("Error: " + e); }
+      setMsg(`小说《${result.name}》已创建。可以切到“小说圣经”或“章节计划”继续。`);
+    } catch (e) { setMsg("错误：" + e); }
     setLoading(false);
   };
 
   const handleDelete = async (id: string) => {
     const p = projects.find(x => x.id === id);
-    if (!confirm(`Delete "${p?.name}"?`)) return;
-    try { await invoke("delete_project", { id }); refresh(); } catch (e) { alert("Error: " + e); }
+    if (!confirm(`确定删除《${p?.name}》？`)) return;
+    try { await invoke("delete_project", { id }); refresh(); } catch (e) { alert("错误：" + e); }
   };
 
   return (
     <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 className="page-title" style={{ marginBottom: 0 }}>Projects ({projects.length})</h2>
-        <button className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>+ New Novel</button>
+        <h2 className="page-title" style={{ marginBottom: 0 }}>项目（{projects.length}）</h2>
+        <button className="btn btn-primary" onClick={() => setShowCreate(!showCreate)}>+ 新建小说</button>
       </div>
 
       {showCreate && (
         <div className="card-feature" style={{ marginBottom: 24 }}>
-          <h3 className="section-title">Create New Novel</h3>
-          <p className="text-meta" style={{ marginBottom: 16 }}>Fill in your world-building preferences. The AI will generate a complete bible based on your input.</p>
+          <h3 className="section-title">创建新小说</h3>
+          <p className="text-meta" style={{ marginBottom: 16 }}>填写世界观偏好，AI 会根据输入生成完整小说圣经。</p>
           <div className="bible-edit-field">
-            <label>Novel Name</label>
+            <label>小说名</label>
             <input value={form.name} onChange={e => setForm({...form, name: e.target.value})} />
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
             <div className="bible-edit-field">
-              <label>Genre (type or select)</label>
+              <label>题材（可输入或选择）</label>
               <input value={form.genre} onChange={e => setForm({...form, genre: e.target.value})} list="genres" placeholder="e.g. 修仙, 科幻, 都市异能..." />
               <datalist id="genres">
                 <option value="修仙" /><option value="武侠" /><option value="科幻" /><option value="都市" /><option value="历史" /><option value="悬疑" /><option value="言情" /><option value="无限流" /><option value="末世" /><option value="游戏异界" />
               </datalist>
             </div>
             <div className="bible-edit-field">
-              <label>Tone (type or select)</label>
+              <label>基调（可输入或选择）</label>
               <input value={form.tone} onChange={e => setForm({...form, tone: e.target.value})} list="tones" placeholder="e.g. 热血, 轻松, 暗黑..." />
               <datalist id="tones">
                 <option value="热血" /><option value="轻松" /><option value="悬疑" /><option value="暗黑" /><option value="史诗" /><option value="幽默" /><option value="温馨" /><option value="冷酷" /><option value="烧脑" />
@@ -796,16 +799,16 @@ function ProjectList({ refresh }: { refresh: () => void }) {
             </div>
           </div>
           <div className="bible-edit-field">
-            <label>Target Audience</label>
+            <label>目标读者</label>
             <input value={form.targetAudience} onChange={e => setForm({...form, targetAudience: e.target.value})} placeholder="e.g. 18-35岁男性读者" />
           </div>
           <div className="bible-edit-field">
-            <label>World-Building Description (short)</label>
-            <textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})} placeholder="Brief description of the world setting, era, or central concept..." />
+            <label>世界观简述</label>
+            <textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})} placeholder="简要描述世界设定、时代背景或核心概念..." />
           </div>
           <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
-            <button className="btn btn-primary" onClick={handleCreate}>Generate Novel Bible</button>
-            <button className="btn btn-secondary" onClick={() => setShowCreate(false)}>Cancel</button>
+            <button className="btn btn-primary" onClick={handleCreate}>生成小说圣经</button>
+            <button className="btn btn-secondary" onClick={() => setShowCreate(false)}>取消</button>
           </div>
         </div>
       )}
@@ -814,9 +817,9 @@ function ProjectList({ refresh }: { refresh: () => void }) {
         <div key={p.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div style={{ cursor: "pointer" }} onClick={() => setSelected(p.id)}>
             <div style={{ fontFamily: "var(--font-display)", fontSize: 16, fontWeight: 400, color: "var(--on-dark)" }}>{p.name}</div>
-            <div className="text-meta">{p.genre || "N/A"} · {p.chapter_count} ch · {(p.total_words||0).toLocaleString()} words · {p.plans_left} plans · {p.chapters_today} today</div>
+            <div className="text-meta">{p.genre || "未填写"} · {p.chapter_count} 章 · {(p.total_words||0).toLocaleString()} 字 · {p.plans_left} 个计划 · 今日 {p.chapters_today} 章</div>
           </div>
-          <button className="btn btn-sm btn-danger" onClick={() => handleDelete(p.id)}>Delete</button>
+          <button className="btn btn-sm btn-danger" onClick={() => handleDelete(p.id)}>删除</button>
         </div>
       ))}
     </>
@@ -844,7 +847,7 @@ function Chapters() {
       setVersions(vers);
       if (vers.length) { setContent(vers[0].body_markdown || ""); setEditContent(vers[0].body_markdown || ""); }
       else setContent("");
-    } catch (_) { setContent("Error loading"); }
+    } catch (_) { setContent("加载失败"); }
   };
 
   const saveEdit = async () => {
@@ -852,29 +855,29 @@ function Chapters() {
     setSaving(true);
     try {
       const ch = chapters.find(c => c.id === openId);
-      await invoke("save_edited_chapter", { chapterId: openId, title: ch?.title || "Revised", bodyMarkdown: editContent });
+      await invoke("save_edited_chapter", { chapterId: openId, title: ch?.title || "修订版", bodyMarkdown: editContent });
       setContent(editContent); setEditing(false);
       // Reload versions
       const vers = await invoke<ChapterVersion[]>("get_chapter_versions", { chapterId: openId });
       setVersions(vers);
-    } catch (e) { alert("Error: " + e); }
+    } catch (e) { alert("错误：" + e); }
     setSaving(false);
   };
 
   return (
     <>
-      <h2 className="page-title">Chapters</h2>
+      <h2 className="page-title">章节</h2>
       {chapters.map(ch => (
         <div key={ch.id} className="chapter-item" onClick={() => open(ch)}>
-          <div className="chapter-title">Ch.{ch.sequence} — {ch.title || "Untitled"} <span className="badge badge-active">{ch.status}</span></div>
+          <div className="chapter-title">第 {ch.sequence} 章 — {ch.title || "未命名"} <span className="badge badge-active">{ch.status}</span></div>
           <div className="chapter-meta">{ch.word_count || 0} words</div>
           {openId === ch.id && (
             <div style={{ marginTop: 8 }} onClick={e => e.stopPropagation()}>
               {!editing ? (
                 <>
-                  <div className="content-preview">{content || "(No content)"}</div>
+                  <div className="content-preview">{content || "（暂无内容）"}</div>
                   <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                    <button className="btn btn-sm btn-primary" onClick={() => setEditing(true)}>Edit</button>
+                    <button className="btn btn-sm btn-primary" onClick={() => setEditing(true)}>编辑</button>
                     {versions.length > 1 && (
                       <select className="select" style={{ height: 36, fontSize: 12 }} onChange={e => {
                         const v = versions.find(v => v.id === e.target.value);
@@ -889,8 +892,8 @@ function Chapters() {
                 <>
                   <textarea className="content-editor" value={editContent} onChange={e => setEditContent(e.target.value)} />
                   <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                    <button className="btn btn-sm btn-primary" onClick={saveEdit} disabled={saving}>{saving ? "Saving..." : "Save Changes"}</button>
-                    <button className="btn btn-sm btn-secondary" onClick={() => setEditing(false)}>Cancel</button>
+                    <button className="btn btn-sm btn-primary" onClick={saveEdit} disabled={saving}>{saving ? "保存中..." : "保存修改"}</button>
+                    <button className="btn btn-sm btn-secondary" onClick={() => setEditing(false)}>取消</button>
                   </div>
                 </>
               )}
@@ -898,7 +901,7 @@ function Chapters() {
           )}
         </div>
       ))}
-      {chapters.length === 0 && <div className="text-meta">No chapters yet. Create a novel and click Write Chapter Now.</div>}
+      {chapters.length === 0 && <div className="text-meta">还没有章节。创建小说后可以在仪表盘开始写作。</div>}
     </>
   );
 }
@@ -918,32 +921,32 @@ function ChapterPlans() {
       await invoke("update_chapter_plan", { id, title: editTitle, outline: editOutline });
       setPlans(plans.map(p => p.id === id ? {...p, title: editTitle, outline: editOutline} : p));
       setEditId(null);
-    } catch (e) { alert("Error: " + e); }
+    } catch (e) { alert("错误：" + e); }
   };
 
   return (
     <>
-      <h2 className="page-title">Chapter Plans</h2>
+      <h2 className="page-title">章节计划</h2>
       {plans.map(p => (
         <div key={p.id} className="card" onClick={() => { setEditId(p.id); setEditTitle(p.title || ""); setEditOutline(p.outline || ""); }} style={{ cursor: "pointer" }}>
           <div className="chapter-title" style={{ color: p.status === "planned" ? "var(--primary)" : "var(--on-dark)" }}>
-            Ch.{p.sequence} — {p.title || "Untitled"} <span className="badge badge-active">{p.status}</span>
+            第 {p.sequence} 章 — {p.title || "未命名"} <span className="badge badge-active">{p.status}</span>
           </div>
           {editId === p.id ? (
             <div onClick={e => e.stopPropagation()} style={{ marginTop: 8 }}>
-              <div className="bible-edit-field"><label>Title</label><input value={editTitle} onChange={e => setEditTitle(e.target.value)} /></div>
-              <div className="bible-edit-field"><label>Outline</label><textarea value={editOutline} onChange={e => setEditOutline(e.target.value)} /></div>
+              <div className="bible-edit-field"><label>标题</label><input value={editTitle} onChange={e => setEditTitle(e.target.value)} /></div>
+              <div className="bible-edit-field"><label>大纲</label><textarea value={editOutline} onChange={e => setEditOutline(e.target.value)} /></div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                <button className="btn btn-sm btn-primary" onClick={() => savePlan(p.id)}>Save</button>
-                <button className="btn btn-sm btn-secondary" onClick={() => setEditId(null)}>Cancel</button>
+                <button className="btn btn-sm btn-primary" onClick={() => savePlan(p.id)}>保存</button>
+                <button className="btn btn-sm btn-secondary" onClick={() => setEditId(null)}>取消</button>
               </div>
             </div>
           ) : (
-            <div className="text-meta" style={{ marginTop: 4 }}>{p.outline?.slice(0, 200) || "No outline"} · {p.target_word_count || 0} words</div>
+            <div className="text-meta" style={{ marginTop: 4 }}>{p.outline?.slice(0, 200) || "暂无大纲"} · {p.target_word_count || 0} 字</div>
           )}
         </div>
       ))}
-      {plans.length === 0 && <div className="text-meta">No chapter plans. Run Generate Weekly Plan first.</div>}
+      {plans.length === 0 && <div className="text-meta">还没有章节计划。请先生成周计划。</div>}
     </>
   );
 }
@@ -973,9 +976,9 @@ function ReviewPage() {
   }, [selCh]);
 
   const agentNames: Record<string, string> = {
-    continuity_reviewer: "Continuity", character_reviewer: "Character", plot_logic_reviewer: "Plot Logic",
-    pacing_reviewer: "Pacing", style_reviewer: "Style", safety_reviewer: "Safety", publication_reviewer: "Publication",
-    canon_consistency_precheck: "Canon Precheck",
+    continuity_reviewer: "连贯性", character_reviewer: "人物", plot_logic_reviewer: "剧情逻辑",
+    pacing_reviewer: "节奏", style_reviewer: "风格", safety_reviewer: "安全", publication_reviewer: "发布",
+    canon_consistency_precheck: "圣经预检",
   };
   const parseCanonIssues = (raw: string): CanonPrecheckIssue[] => {
     try {
@@ -991,24 +994,24 @@ function ReviewPage() {
 
   return (
     <>
-      <h2 className="page-title">Review Reports</h2>
+      <h2 className="page-title">审稿报告</h2>
       {qualitySummary && (
         <section className="quality-dashboard">
           <div className="quality-stat-grid">
-            <div><strong>{qualitySummary.reviewed_chapter_count}</strong><span>Reviewed</span></div>
-            <div><strong>{formatNumber(qualitySummary.average_final_score, 1)}</strong><span>Avg Final</span></div>
-            <div><strong>{qualitySummary.publish_ready_count}</strong><span>Ready</span></div>
-            <div><strong>{qualitySummary.revise_count}</strong><span>Revise</span></div>
-            <div><strong>{qualitySummary.needs_human_review_count}</strong><span>Human Review</span></div>
-            <div><strong>{qualitySummary.total_blocking_issues}</strong><span>Blocking</span></div>
+            <div><strong>{qualitySummary.reviewed_chapter_count}</strong><span>已审</span></div>
+            <div><strong>{formatNumber(qualitySummary.average_final_score, 1)}</strong><span>平均终分</span></div>
+            <div><strong>{qualitySummary.publish_ready_count}</strong><span>可发布</span></div>
+            <div><strong>{qualitySummary.revise_count}</strong><span>需修订</span></div>
+            <div><strong>{qualitySummary.needs_human_review_count}</strong><span>人工复核</span></div>
+            <div><strong>{qualitySummary.total_blocking_issues}</strong><span>阻塞问题</span></div>
           </div>
           <div className="quality-summary-row">
             <div>
-              <div className="status-label">Latest Decision</div>
-              <div className="quality-latest">{qualitySummary.latest_decision || "No reviews"}</div>
+              <div className="status-label">最新决策</div>
+              <div className="quality-latest">{qualitySummary.latest_decision || "暂无审稿"}</div>
             </div>
             <div>
-              <div className="status-label">Latest Score</div>
+              <div className="status-label">最新分数</div>
               <div className="quality-latest">{formatNumber(qualitySummary.latest_final_score, 0)}</div>
             </div>
           </div>
@@ -1030,19 +1033,19 @@ function ReviewPage() {
       )}
       <select className="select" value={selCh} onChange={e => setSelCh(e.target.value)} style={{ marginBottom: 16 }}>
         <option value="">-- Select Chapter --</option>
-        {chapters.map(c => <option key={c.id} value={c.id}>Ch.{c.sequence} — {c.title}</option>)}
+        {chapters.map(c => <option key={c.id} value={c.id}>第 {c.sequence} 章 — {c.title}</option>)}
       </select>
       {scores && (
         <div className="card-feature" style={{ marginBottom: 16 }}>
           <div style={{ fontFamily: "var(--font-display)", fontSize: 22, fontWeight: 300, color: "var(--on-dark)" }}>
             Final Score: <span style={{ color: scoreColor(scores.final_score) }}>{formatNumber(scores.final_score, 0)}</span>
           </div>
-          <div className="text-meta" style={{ marginTop: 4 }}>Decision: {scores.decision} · Avg: {formatNumber(scores.average_score, 1)} · Blocking: {scores.blocking_issue_count} · Publish: {scores.publish_allowed ? "Yes" : "No"}</div>
+          <div className="text-meta" style={{ marginTop: 4 }}>决策：{scores.decision} · 平均：{formatNumber(scores.average_score, 1)} · 阻塞：{scores.blocking_issue_count} · 发布：{scores.publish_allowed ? "是" : "否"}</div>
         </div>
       )}
       {canonIssues.length > 0 && (
         <section className="card-feature canon-precheck-panel" style={{ marginBottom: 16 }}>
-          <h3 className="section-title" style={{ color: "var(--warning)" }}>Canon Precheck Issues</h3>
+          <h3 className="section-title" style={{ color: "var(--warning)" }}>圣经预检问题</h3>
           <div className="canon-issue-list">
             {canonIssues.map((issue, idx) => (
               <div className="canon-issue-row" key={`${issue.rule_type || "issue"}-${idx}`}>
@@ -1050,8 +1053,8 @@ function ReviewPage() {
                   <span className={`badge ${issue.severity === "blocking" ? "badge-warning" : "badge-active"}`}>{issue.severity || "warning"}</span>
                   <strong>{issue.rule_type || "canon_issue"}</strong>
                 </div>
-                <div>{issue.message || "Canon consistency issue detected."}</div>
-                {issue.evidence && <div className="text-meta">Evidence: {issue.evidence}</div>}
+                <div>{issue.message || "检测到圣经一致性问题。"}</div>
+                {issue.evidence && <div className="text-meta">证据：{issue.evidence}</div>}
               </div>
             ))}
           </div>
@@ -1060,7 +1063,7 @@ function ReviewPage() {
       {reviews.map(r => (
         <div key={r.id} className="card" style={{ borderLeft: r.pass ? "3px solid var(--success)" : "3px solid var(--warning)" }}>
           <div className="chapter-title">{agentNames[r.agent_name] || r.agent_name} <span className={`badge ${(r.score || 0) >= 80 ? "badge-success" : (r.score || 0) >= 60 ? "badge-active" : "badge-warning"}`}>{r.score}</span></div>
-          <div className="text-meta" style={{ marginTop: 4 }}>{r.pass ? "Pass" : "Fail"}</div>
+          <div className="text-meta" style={{ marginTop: 4 }}>{r.pass ? "通过" : "未通过"}</div>
           {r.agent_name !== "canon_consistency_precheck" && r.blocking_issues && r.blocking_issues !== "[]" && <div className="msg-banner msg-error">{r.blocking_issues.slice(0, 300)}</div>}
         </div>
       ))}
@@ -1100,15 +1103,15 @@ function JobsPage() {
 
   const color = (s: string) => s === "completed" ? "var(--success)" : s === "failed" ? "var(--warning)" : s === "needs_human_review" ? "#f39c12" : "var(--primary)";
   const phaseLabels: Record<string, string> = {
-    acquire_lock: "Lock",
-    load_canon: "Canon",
+    acquire_lock: "锁定",
+    load_canon: "圣经",
     retrieve_context: "RAG",
-    generate_draft: "Draft",
-    aggregate_reviews: "Reviews",
-    revise: "Revise",
-    export: "Export",
-    update_canon: "Update Canon",
-    complete: "Complete",
+    generate_draft: "草稿",
+    aggregate_reviews: "审稿",
+    revise: "修订",
+    export: "导出",
+    update_canon: "更新圣经",
+    complete: "完成",
   };
   const parseMetadata = (metadata: string): JobMetadata => {
     try {
@@ -1138,7 +1141,7 @@ function JobsPage() {
 
   return (
     <>
-      <h2 className="page-title">Generation Jobs</h2>
+      <h2 className="page-title">生成任务</h2>
       <div className="jobs-workbench">
         {jobs.map(j => {
           const metadata = parseMetadata(j.metadata);
@@ -1159,13 +1162,13 @@ function JobsPage() {
                 <div className="job-status-pill" style={{ borderColor: color(j.status), color: color(j.status) }}>{j.status}</div>
               </div>
               <div className="job-metric-row">
-                <div><strong>{summary.phase_count ?? events.length}</strong><span>Phases</span></div>
-                <div><strong>{formatDuration(summary.total_elapsed_ms)}</strong><span>Elapsed</span></div>
-                <div><strong>{slowest}</strong><span>Slowest</span></div>
-                <div><strong>{j.retry_count || 0}</strong><span>Retries</span></div>
+                <div><strong>{summary.phase_count ?? events.length}</strong><span>阶段</span></div>
+                <div><strong>{formatDuration(summary.total_elapsed_ms)}</strong><span>耗时</span></div>
+                <div><strong>{slowest}</strong><span>最慢</span></div>
+                <div><strong>{j.retry_count || 0}</strong><span>重试</span></div>
                 <div><strong>{formatTokens(usage.total_tokens)}</strong><span>Tokens</span></div>
-                <div><strong>{formatCost(usage.estimated_cost_usd)}</strong><span>Cost</span></div>
-                <div><strong>{summary.last_step ? (phaseLabels[summary.last_step] || summary.last_step) : "n/a"}</strong><span>Last Step</span></div>
+                <div><strong>{formatCost(usage.estimated_cost_usd)}</strong><span>费用</span></div>
+                <div><strong>{summary.last_step ? (phaseLabels[summary.last_step] || summary.last_step) : "n/a"}</strong><span>最后步骤</span></div>
               </div>
               {failure && <div className="msg-banner msg-error job-failure">{failure}</div>}
               {events.length > 0 ? (
@@ -1185,7 +1188,7 @@ function JobsPage() {
                   ))}
                 </div>
               ) : (
-                <div className="text-meta">No phase timeline recorded for this job.</div>
+                <div className="text-meta">这个任务还没有阶段时间线。</div>
               )}
             </div>
           );
@@ -1204,7 +1207,7 @@ function BiblePage() {
 
   useEffect(() => { if (selected) invoke<BibleData>("get_bible", { projectId: selected }).then(setBible).catch(e => console.error(e)); }, [selected]);
 
-  if (!bible) return <div className="text-meta">Select a project to view Bible data.</div>;
+  if (!bible) return <div className="text-meta">选择项目后查看小说圣经数据。</div>;
 
   const tabs: Record<string, any[]> = {
     characters: bible.characters, locations: bible.locations, organizations: bible.organizations,
@@ -1213,9 +1216,9 @@ function BiblePage() {
     style_guides: bible.style_guides, timeline_events: bible.timeline_events,
   };
   const tabNames: Record<string, string> = {
-    characters: "Characters", locations: "Locations", organizations: "Organizations", items: "Items",
-    world_lore: "World Lore", magic_systems: "Magic", canon_rules: "Canon Rules",
-    plot_threads: "Plot Threads", foreshadowing: "Foreshadowing", style_guides: "Style Guide", timeline_events: "Timeline",
+    characters: "人物", locations: "地点", organizations: "组织", items: "物品",
+    world_lore: "世界观", magic_systems: "力量体系", canon_rules: "圣经规则",
+    plot_threads: "剧情线", foreshadowing: "伏笔", style_guides: "风格指南", timeline_events: "时间线",
   };
 
   const saveBibleEdit = async () => {
@@ -1224,7 +1227,7 @@ function BiblePage() {
       await invoke("update_bible_entry", { table: tab, id: editingItem.id, data: JSON.stringify(editingItem) });
       setBible({...bible, [tab]: tabs[tab].map(item => item.id === editingItem.id ? editingItem : item)});
       setEditingItem(null);
-    } catch (e) { alert("Error: " + e); }
+    } catch (e) { alert("错误：" + e); }
   };
 
   const editableFields: Record<string, string[]> = {
@@ -1243,7 +1246,7 @@ function BiblePage() {
 
   return (
     <>
-      <h2 className="page-title">Novel Bible</h2>
+      <h2 className="page-title">小说圣经</h2>
       <div className="tab-bar">
         {Object.keys(tabs).map(k => (
           <button key={k} className={`tab-btn ${tab === k ? "active" : ""}`} onClick={() => { setTab(k); setEditingItem(null); }}>{tabNames[k]}</button>
@@ -1252,7 +1255,7 @@ function BiblePage() {
 
       {editingItem && (
         <div className="bible-edit-panel">
-          <h3 style={{ fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 300, color: "var(--on-dark)", marginBottom: 16 }}>Edit {tabNames[tab]}</h3>
+          <h3 style={{ fontFamily: "var(--font-display)", fontSize: 18, fontWeight: 300, color: "var(--on-dark)", marginBottom: 16 }}>编辑{tabNames[tab]}</h3>
           {(editableFields[tab] || []).map(field => (
             <div className="bible-edit-field" key={field}>
               <label>{field}</label>
@@ -1260,16 +1263,16 @@ function BiblePage() {
             </div>
           ))}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button className="btn btn-sm btn-primary" onClick={saveBibleEdit}>Save</button>
-            <button className="btn btn-sm btn-secondary" onClick={() => setEditingItem(null)}>Cancel</button>
-            <button className="btn btn-sm btn-commerce" style={{marginLeft:8}} onClick={async () => { await saveBibleEdit(); await invoke("rebuild_vector_index", { projectId: selected }); alert("Applied to all — vector index rebuilt."); }}>Apply to All & Rebuild Index</button>
+            <button className="btn btn-sm btn-primary" onClick={saveBibleEdit}>保存</button>
+            <button className="btn btn-sm btn-secondary" onClick={() => setEditingItem(null)}>取消</button>
+            <button className="btn btn-sm btn-commerce" style={{marginLeft:8}} onClick={async () => { await saveBibleEdit(); await invoke("rebuild_vector_index", { projectId: selected }); alert("已应用到全部，向量索引已重建。"); }}>应用到全部并重建索引</button>
           </div>
         </div>
       )}
 
       <div className="card">
         {(tabs[tab] || []).length === 0 && (
-          <div className="text-meta">{tab === "foreshadowing" || tab === "timeline_events" ? "These will populate after writing chapters." : "No data."}</div>
+          <div className="text-meta">{tab === "foreshadowing" || tab === "timeline_events" ? "写作章节后会逐步填充这里。" : "暂无数据。"}</div>
         )}
         {(tabs[tab] || []).map((item: any, i: number) => (
           <div key={i} className="bible-item" style={{ cursor: "pointer" }} onClick={() => setEditingItem({...item})}>
@@ -1318,7 +1321,7 @@ function KnowledgeGraphPage() {
       setMessage("");
     } catch (e) {
       setSnapshot(null);
-      setMessage("Error: " + e);
+      setMessage("错误：" + e);
     }
   }, [selected]);
 
@@ -1351,14 +1354,7 @@ function KnowledgeGraphPage() {
   const edges = snapshot?.edges || [];
   const nodeById = new Map(nodes.map(node => [node.id, node]));
   const types = Array.from(new Set(nodes.map(node => node.node_type))).sort();
-  const typeLabel = (type: string) => type.replace(/_/g, " ");
-  const graphNodeInitial = (type: string) =>
-    type
-      .split("_")
-      .map(part => part[0] || "")
-      .join("")
-      .slice(0, 2)
-      .toUpperCase() || "N";
+  const typeLabel = graphTypeLabel;
   const query = search.trim().toLowerCase();
   const visibleNodes = nodes.filter(node => {
     const matchesType = typeFilter === "all" || node.node_type === typeFilter;
@@ -1377,11 +1373,11 @@ function KnowledgeGraphPage() {
     : [];
   const selectedDegree = selectedNode ? connectedEdges.length : 0;
   const graphEmptyMessage = nodes.length === 0
-    ? "No graph nodes yet. Generate canon or write a chapter to build the graph."
+    ? "还没有图谱节点。生成圣经或写作章节后会自动建立关系图谱。"
     : visibleNodes.length === 0
-      ? "No matching nodes."
+      ? "没有匹配的节点。"
       : visibleEdges.length === 0
-        ? "Nodes are available, but no relationships yet. Generate a chapter or add an edge."
+        ? "已有节点，但还没有关系。可以生成章节或手动添加关系。"
         : "";
 
   useEffect(() => {
@@ -1401,7 +1397,7 @@ function KnowledgeGraphPage() {
       return;
     }
     let cancelled = false;
-    setNeighborhoodStatus("Loading graph context...");
+    setNeighborhoodStatus("正在加载图谱上下文...");
     invoke<KnowledgeGraphNeighborhood>("get_knowledge_graph_neighborhood", {
       projectId: selected,
       nodeId: selectedNode.id,
@@ -1416,7 +1412,7 @@ function KnowledgeGraphPage() {
       .catch(e => {
         if (!cancelled) {
           setNeighborhood(null);
-          setNeighborhoodStatus("Error: " + e);
+          setNeighborhoodStatus("错误：" + e);
         }
       });
     return () => { cancelled = true; };
@@ -1497,7 +1493,7 @@ function KnowledgeGraphPage() {
     const source = nodeById.get(edgeForm.sourceId);
     const target = nodeById.get(edgeForm.targetId);
     if (!source || !target) {
-      setMessage("Error: choose source and target nodes");
+      setMessage("错误：请选择来源和目标节点");
       return;
     }
     try {
@@ -1512,9 +1508,9 @@ function KnowledgeGraphPage() {
       });
       setEdgeForm(prev => ({ ...prev, description: "" }));
       await loadGraph();
-      setMessage("Edge created.");
+      setMessage("关系已创建。");
     } catch (e) {
-      setMessage("Error: " + e);
+      setMessage("错误：" + e);
     }
   };
 
@@ -1522,35 +1518,35 @@ function KnowledgeGraphPage() {
     try {
       await invoke("delete_knowledge_graph_edge", { edgeId });
       await loadGraph();
-      setMessage("Edge deleted.");
+      setMessage("关系已删除。");
     } catch (e) {
-      setMessage("Error: " + e);
+      setMessage("错误：" + e);
     }
   };
 
   if (!selected) {
     return (
       <>
-        <h2 className="page-title">Knowledge Graph</h2>
-        <div className="text-meta">Select a project to view the knowledge graph.</div>
+        <h2 className="page-title">关系图谱</h2>
+        <div className="text-meta">选择项目后查看关系图谱。</div>
       </>
     );
   }
 
   return (
     <>
-      <h2 className="page-title">Knowledge Graph</h2>
+      <h2 className="page-title">关系图谱</h2>
       <div className="graph-workbench">
         <div className="graph-toolbar">
-          <div className="graph-stat"><strong>{nodes.length}</strong><span>Nodes</span></div>
-          <div className="graph-stat"><strong>{edges.length}</strong><span>Edges</span></div>
-          <div className="graph-stat"><strong>{snapshot?.orphan_count ?? 0}</strong><span>Orphans</span></div>
-          <div className="graph-stat"><strong>{selectedDegree}</strong><span>Selected Degree</span></div>
-          <input className="text-input graph-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search canon..." />
+          <div className="graph-stat"><strong>{nodes.length}</strong><span>节点</span></div>
+          <div className="graph-stat"><strong>{edges.length}</strong><span>关系</span></div>
+          <div className="graph-stat"><strong>{snapshot?.orphan_count ?? 0}</strong><span>孤立节点</span></div>
+          <div className="graph-stat"><strong>{selectedDegree}</strong><span>当前关系数</span></div>
+          <input className="text-input graph-search" value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索设定、人物或地点..." />
         </div>
 
         <div className="graph-type-filter">
-          <button className={`tab-btn ${typeFilter === "all" ? "active" : ""}`} onClick={() => setTypeFilter("all")}>All</button>
+          <button className={`tab-btn ${typeFilter === "all" ? "active" : ""}`} onClick={() => setTypeFilter("all")}>全部</button>
           {types.map(type => (
             <button key={type} className={`tab-btn ${typeFilter === type ? "active" : ""}`} onClick={() => setTypeFilter(type)}>
               {typeLabel(type)}
@@ -1567,7 +1563,7 @@ function KnowledgeGraphPage() {
             onPointerCancel={event => stopDragging(event.pointerId)}
             onPointerLeave={() => stopDragging()}
           >
-            <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Knowledge graph relationships">
+            <svg className="graph-edge-layer" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="关系图谱连线">
               {visibleEdges.map((edge, edgeIndex) => {
                 const source = positions.get(edge.source_node_id);
                 const target = positions.get(edge.target_node_id);
@@ -1598,11 +1594,12 @@ function KnowledgeGraphPage() {
                   onPointerDown={event => handleNodePointerDown(event, node)}
                   onClick={event => { event.stopPropagation(); setSelectedNodeId(node.id); }}
                   title={`${node.label} (${typeLabel(node.node_type)})`}
-                  aria-label={`${node.label}, ${typeLabel(node.node_type)}, ${node.degree} relationships`}
+                  aria-label={`${node.label}，${typeLabel(node.node_type)}，${node.degree} 条关系`}
                   aria-pressed={selectedNode?.id === node.id}
                   type="button"
                 >
-                  <span className="graph-node-initial" aria-hidden="true">{graphNodeInitial(node.node_type)}</span>
+                  <span className="graph-node-type" aria-hidden="true">{graphNodeBadge(node.node_type)}</span>
+                  <span className="graph-node-label">{graphNodeDisplayLabel(node.label)}</span>
                   <span className="graph-node-degree" aria-hidden="true">{node.degree}</span>
                 </button>
               );
@@ -1615,35 +1612,35 @@ function KnowledgeGraphPage() {
               <>
                 <div className="status-label">{typeLabel(selectedNode.node_type)}</div>
                 <h3>{selectedNode.label}</h3>
-                <div className="text-meta">{[selectedNode.subtitle, selectedNode.status, `${selectedNode.degree} edges`].filter(Boolean).join(" · ")}</div>
+                <div className="text-meta">{[selectedNode.subtitle, selectedNode.status, `${selectedNode.degree} 条关系`].filter(Boolean).join(" · ")}</div>
                 {selectedNode.description && <p className="graph-description">{selectedNode.description}</p>}
                 <div className="graph-rag-panel">
-                  <h4>Retrieval Hints</h4>
+                  <h4>检索提示</h4>
                   {neighborhoodStatus ? (
                     <div className="text-meta">{neighborhoodStatus}</div>
                   ) : neighborhood ? (
                     <>
                       <div className="graph-hint-row">
-                        <span>Source</span>
+                        <span>来源</span>
                         <strong>{neighborhood.retrieval_hints.source_key}</strong>
                       </div>
                       <div className="graph-hint-row">
-                        <span>Connected</span>
+                        <span>连接</span>
                         <strong>{neighborhood.retrieval_hints.connected_source_keys.length}</strong>
                       </div>
                       <div className="graph-hint-chips">
                         {neighborhood.retrieval_hints.connected_source_keys.slice(0, 8).map(key => <span key={key}>{key}</span>)}
-                        {neighborhood.retrieval_hints.connected_source_keys.length === 0 && <em>No connected sources</em>}
+                        {neighborhood.retrieval_hints.connected_source_keys.length === 0 && <em>暂无连接来源</em>}
                       </div>
                       <div className="graph-query-terms">
                         {neighborhood.retrieval_hints.query_terms.slice(0, 8).map(term => <span key={term}>{term}</span>)}
                       </div>
                     </>
                   ) : (
-                    <div className="text-meta">No retrieval hints available.</div>
+                    <div className="text-meta">暂无检索提示。</div>
                   )}
                 </div>
-                <h4>Relationships</h4>
+                <h4>关系</h4>
                 <div className="edge-list">
                   {connectedEdges.map(edge => {
                     const otherId = edge.source_node_id === selectedNode.id ? edge.target_node_id : edge.source_node_id;
@@ -1655,44 +1652,44 @@ function KnowledgeGraphPage() {
                           <span>{other?.label || otherId}</span>
                           {edge.description && <p>{edge.description}</p>}
                         </div>
-                        {!edge.auto_inferred && <button className="btn btn-sm btn-danger" onClick={() => deleteEdge(edge.id)}>Delete</button>}
+                        {!edge.auto_inferred && <button className="btn btn-sm btn-danger" onClick={() => deleteEdge(edge.id)}>删除</button>}
                       </div>
                     );
                   })}
-                  {connectedEdges.length === 0 && <div className="text-meta">No relationships yet.</div>}
+                  {connectedEdges.length === 0 && <div className="text-meta">暂无关系。</div>}
                 </div>
               </>
             ) : (
-              <div className="text-meta">No node selected.</div>
+              <div className="text-meta">未选择节点。</div>
             )}
 
             <div className="edge-form">
-              <h4>Add Relationship</h4>
+              <h4>添加关系</h4>
               <label>
-                <span>Source</span>
+                <span>来源</span>
                 <select value={edgeForm.sourceId} onChange={e => setEdgeForm(prev => ({ ...prev, sourceId: e.target.value }))}>
                   {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {typeLabel(node.node_type)}</option>)}
                 </select>
               </label>
               <label>
-                <span>Target</span>
+                <span>目标</span>
                 <select value={edgeForm.targetId} onChange={e => setEdgeForm(prev => ({ ...prev, targetId: e.target.value }))}>
                   {nodes.map(node => <option key={node.id} value={node.id}>{node.label} · {typeLabel(node.node_type)}</option>)}
                 </select>
               </label>
               <label>
-                <span>Type</span>
+                <span>关系类型</span>
                 <input value={edgeForm.edgeType} onChange={e => setEdgeForm(prev => ({ ...prev, edgeType: e.target.value }))} />
               </label>
               <label>
-                <span>Description</span>
+                <span>描述</span>
                 <textarea value={edgeForm.description} onChange={e => setEdgeForm(prev => ({ ...prev, description: e.target.value }))} />
               </label>
-              <button className="btn btn-primary" onClick={createEdge} disabled={nodes.length < 2}>Create Edge</button>
+              <button className="btn btn-primary" onClick={createEdge} disabled={nodes.length < 2}>创建关系</button>
             </div>
           </aside>
         </div>
-        {message && <div className={`msg-banner ${message.startsWith("Error") ? "msg-error" : "msg-success"}`}>{message}</div>}
+        {message && <div className={`msg-banner ${message.startsWith("错误") ? "msg-error" : "msg-success"}`}>{message}</div>}
       </div>
     </>
   );
@@ -1712,13 +1709,13 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
   }, [settings]);
 
   const saveAndTest = async () => {
-    if (!apiKey.trim()) { setTestResult("Error: Please enter an API key first."); return; }
-    setTesting(true); setTestResult("Connecting...");
+    if (!apiKey.trim()) { setTestResult("错误：请先输入 API Key。"); return; }
+    setTesting(true); setTestResult("连接中...");
     try {
       const r = await invoke<{ ok: boolean; message: string; latency_ms?: number }>("test_model_provider", { provider, apiKey: apiKey.trim(), baseUrl: null, model: settings?.model || null });
-      setTestResult(r.ok ? `Connected! (${r.latency_ms ?? "?"}ms) — ${r.message}` : `FAIL: ${r.message}`);
+      setTestResult(r.ok ? `已连接（${r.latency_ms ?? "?"}ms）— ${r.message}` : `失败：${r.message}`);
       if (r.ok) setApiKey("");
-    } catch (e) { setTestResult("Error: " + e); }
+    } catch (e) { setTestResult("错误：" + e); }
     setTesting(false);
     refreshSettings();
   };
@@ -1733,73 +1730,73 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
 
   return (
     <>
-      <h2 className="page-title">Settings</h2>
+      <h2 className="page-title">设置</h2>
       <div className="card-feature" style={{ marginBottom: 24 }}>
-        <h3 className="section-title" style={{ color: "var(--primary)" }}>Model Provider</h3>
+        <h3 className="section-title" style={{ color: "var(--primary)" }}>模型服务商</h3>
         <div className="bible-edit-field">
-          <label>Provider</label>
+          <label>服务商</label>
           <select className="select" value={provider} onChange={e => { setProvider(e.target.value); }}>
-            <option value="deepseek">DeepSeek (Recommended)</option>
+            <option value="deepseek">DeepSeek（推荐）</option>
             <option value="kimi">Kimi (月之暗面)</option>
             <option value="zhipu">智谱 GLM</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic / Claude</option>
             <option value="gemini">Google Gemini</option>
-            <option value="openai_compat">OpenAI Compatible</option>
-            <option value="custom">Custom...</option>
+            <option value="openai_compat">OpenAI 兼容接口</option>
+            <option value="custom">自定义...</option>
           </select>
         </div>
         <div className="bible-edit-field">
-          <label>Model <span className="text-meta">(editable — type any model name)</span></label>
-          <input className="text-input" value={settings?.model || ""} onChange={e => invoke("update_settings", { settings: { ...settings, model: e.target.value } }).then(refreshSettings)} placeholder={provider==="deepseek"?"deepseek-v4-pro":provider==="kimi"?"moonshot-v1-8k":provider==="zhipu"?"glm-4-flash":"model name"} />
+          <label>模型 <span className="text-meta">（可编辑，支持任意模型名）</span></label>
+          <input className="text-input" value={settings?.model || ""} onChange={e => invoke("update_settings", { settings: { ...settings, model: e.target.value } }).then(refreshSettings)} placeholder={provider==="deepseek"?"deepseek-v4-pro":provider==="kimi"?"moonshot-v1-8k":provider==="zhipu"?"glm-4-flash":"模型名称"} />
         </div>
         <div className="bible-edit-field">
-          <label>API Key {savedProvider && savedProvider !== provider ? "(saved for " + savedProvider + ")" : savedProvider ? "(saved)" : "(not yet saved)"}</label>
+          <label>API Key {savedProvider && savedProvider !== provider ? "（已保存给 " + savedProvider + "）" : savedProvider ? "（已保存）" : "（尚未保存）"}</label>
           <input className="text-input" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-..." />
         </div>
-        <button className="btn btn-primary" onClick={saveAndTest} disabled={testing || !apiKey.trim()}>{testing ? "Testing..." : "Save & Test Connection"}</button>
+        <button className="btn btn-primary" onClick={saveAndTest} disabled={testing || !apiKey.trim()}>{testing ? "测试中..." : "保存并测试连接"}</button>
         {testResult && (
-          <div className={`msg-banner ${testResult.startsWith("Connected") ? "msg-success" : "msg-error"}`} style={{ marginTop: 12 }}>
+          <div className={`msg-banner ${testResult.startsWith("已连接") ? "msg-success" : "msg-error"}`} style={{ marginTop: 12 }}>
             {testResult}
           </div>
         )}
       </div>
       {settings && (
         <div className="card">
-          <h3 className="section-title">Current Config (click to edit)</h3>
-          <SaveField label="Model" value={settings.model} onSave={v => invoke("update_settings", { settings: { ...settings, model: v } }).then(refreshSettings)} />
+          <h3 className="section-title">当前配置（点击编辑）</h3>
+          <SaveField label="模型" value={settings.model} onSave={v => invoke("update_settings", { settings: { ...settings, model: v } }).then(refreshSettings)} />
           <SaveField label="Base URL" value={settings.base_url} onSave={v => invoke("update_settings", { settings: { ...settings, base_url: v } }).then(refreshSettings)} />
-          <SaveField label="Data Directory" value={settings.data_dir} onSave={v => invoke("update_settings", { settings: { ...settings, data_dir: v } }).then(refreshSettings)} />
-          <SaveField label="Quality Threshold" value={String(settings.quality_threshold)} onSave={v => invoke("update_settings", { settings: { ...settings, quality_threshold: parseInt(v) || 85 } }).then(refreshSettings)} />
-          <SaveField label="Max Revise Count" value={String(settings.max_revise_count)} onSave={v => invoke("update_settings", { settings: { ...settings, max_revise_count: parseInt(v) || 2 } }).then(refreshSettings)} />
-          <SaveField label="Daily Target Words" value={String(settings.daily_target_words)} onSave={v => invoke("update_settings", { settings: { ...settings, daily_target_words: parseInt(v) || 3000 } }).then(refreshSettings)} />
-          <SaveField label="Input Cost / 1M Tokens" value={formatOptionalCost(settings.input_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, input_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
-          <SaveField label="Output Cost / 1M Tokens" value={formatOptionalCost(settings.output_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, output_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
+          <SaveField label="数据目录" value={settings.data_dir} onSave={v => invoke("update_settings", { settings: { ...settings, data_dir: v } }).then(refreshSettings)} />
+          <SaveField label="质量阈值" value={String(settings.quality_threshold)} onSave={v => invoke("update_settings", { settings: { ...settings, quality_threshold: parseInt(v) || 85 } }).then(refreshSettings)} />
+          <SaveField label="最大修订次数" value={String(settings.max_revise_count)} onSave={v => invoke("update_settings", { settings: { ...settings, max_revise_count: parseInt(v) || 2 } }).then(refreshSettings)} />
+          <SaveField label="每日目标字数" value={String(settings.daily_target_words)} onSave={v => invoke("update_settings", { settings: { ...settings, daily_target_words: parseInt(v) || 3000 } }).then(refreshSettings)} />
+          <SaveField label="输入成本 / 100 万 Tokens" value={formatOptionalCost(settings.input_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, input_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
+          <SaveField label="输出成本 / 100 万 Tokens" value={formatOptionalCost(settings.output_cost_per_million)} type="number" onSave={v => invoke("update_settings", { settings: { ...settings, output_cost_per_million: parseOptionalCost(v) } }).then(refreshSettings)} />
           <div className="bible-edit-field">
-            <label>Embedding Provider</label>
+            <label>Embedding 服务商</label>
             <select className="select" value={settings.embedding_provider || "none"} onChange={e => {
               invoke("update_settings", { settings: { ...settings, embedding_provider: e.target.value } }).then(refreshSettings);
             }}>
-              <option value="none">None (disabled)</option>
+              <option value="none">无（关闭）</option>
               <option value="openai">OpenAI</option>
               <option value="zhipu">智谱 GLM</option>
-              <option value="openai_compat">Custom</option>
+              <option value="openai_compat">自定义</option>
             </select>
             {(!settings.embedding_provider || settings.embedding_provider === "none") && (
-              <div className="msg-banner msg-error" style={{ marginTop: 8 }}>RAG vector search is disabled. Configure an embedding provider to enable. Without RAG, the AI has less continuity context.</div>
+              <div className="msg-banner msg-error" style={{ marginTop: 8 }}>RAG 向量检索已关闭。配置 Embedding 服务商后可启用；未启用时，AI 的连续性上下文会更少。</div>
             )}
           </div>
           {settings.embedding_provider && settings.embedding_provider !== "none" && (
             <EmbeddingSettings settings={settings} refreshSettings={refreshSettings} />
           )}
           <div className="bible-edit-field" style={{ marginTop: 12 }}>
-            <label>Auto Publish</label>
+            <label>自动发布</label>
             <input type="checkbox" checked={settings.auto_publish} onChange={e => {
               invoke("update_settings", { settings: { ...settings, auto_publish: e.target.checked } }).then(refreshSettings);
             }} />
           </div>
           <div className="bible-edit-field">
-            <label>Debug Mode</label>
+            <label>调试模式</label>
             <input type="checkbox" checked={settings.debug_mode} onChange={e => {
               invoke("update_settings", { settings: { ...settings, debug_mode: e.target.checked } }).then(refreshSettings);
             }} />
@@ -1853,7 +1850,7 @@ function SaveField({ label, value, type = "text", onSave }: { label: string; val
           style={{ padding: "6px 10px", background: "var(--surface-dark-card)", color: "var(--on-dark)", border: "1px solid var(--primary)", borderRadius: "var(--radius-sm)", fontSize: 13, width: "100%", maxWidth: 400 }} />
       ) : (
         <div onClick={() => setEditing(true)} style={{ padding: "6px 10px", cursor: "pointer", color: "var(--on-dark-body)", borderBottom: "1px dashed var(--hairline-dark)" }}>
-          {value || "(click to set)"}
+          {value || "（点击设置）"}
         </div>
       )}
     </div>
@@ -1892,12 +1889,12 @@ function LearnPage() {
   const handleLearnFile = async () => {
     const file = selectedFile;
     if (!file) return;
-    if (!selected) { setResult("Error: Select a project first."); return; }
-    if (file.size > maxLearningFileBytes) { setResult("Error: File too large (>1 MiB)."); return; }
-    setLearning(true); setResult("Reading file...");
+    if (!selected) { setResult("错误：请先选择项目。"); return; }
+    if (file.size > maxLearningFileBytes) { setResult("错误：文件过大（超过 1 MiB）。"); return; }
+    setLearning(true); setResult("正在读取文件...");
     try {
       const text = await file.text();
-      setResult("Extracting patterns...");
+      setResult("正在提取模式...");
       const r = await invoke<any[]>("learn_from_file_text", {
         projectId: selected,
         fileName: file.name,
@@ -1905,25 +1902,25 @@ function LearnPage() {
         text,
         sourceTitle: sourceTitle.trim() || null,
       });
-      setResult(`Learned ${r.length} patterns`);
+      setResult(`已学习 ${r.length} 个模式`);
       setSelectedFile(null); setSourceTitle("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       loadEntries();
-    } catch (e: any) { setResult("Error: " + (e.message || String(e))); }
+    } catch (e: any) { setResult("错误：" + (e.message || String(e))); }
     finally { setLearning(false); }
   };
 
   const handleLearnUrl = async () => {
     if (!url.trim()) return;
-    if (!selected) { setResult("Error: Select a project first."); return; }
-    setLearning(true); setResult("Fetching and extracting page...");
+    if (!selected) { setResult("错误：请先选择项目。"); return; }
+    setLearning(true); setResult("正在抓取并提取页面...");
     try {
-      setResult("Extracting patterns...");
+      setResult("正在提取模式...");
       const r = await invoke<any[]>("learn_from_url", { projectId: selected, url: url.trim() });
-      setResult(`Learned ${r.length} patterns`);
+      setResult(`已学习 ${r.length} 个模式`);
       setUrl("");
       loadEntries();
-    } catch (e: any) { setResult("Error: " + (e.message || String(e))); }
+    } catch (e: any) { setResult("错误：" + (e.message || String(e))); }
     finally { setLearning(false); }
   };
 
@@ -1938,44 +1935,44 @@ function LearnPage() {
     narrative_device:"#00bcd4", improvement_note:"var(--warning)",
   };
   const sourceMarkerLabel = (sourceType?: string) =>
-    sourceType === "web" ? "Web" : sourceType === "self_reflection" ? "Review" : "File";
+    sourceType === "web" ? "网页" : sourceType === "self_reflection" ? "复盘" : "文件";
 
   return (
     <>
-      <h2 className="page-title">Learn & Evolve</h2>
+      <h2 className="page-title">学习库</h2>
       <div className="tab-bar">
-        <button className={`tab-btn ${tab==="file"?"active":""}`} onClick={()=>setTab("file")}>File Learn</button>
-        <button className={`tab-btn ${tab==="web"?"active":""}`} onClick={()=>setTab("web")}>Web Learn</button>
-        <button className={`tab-btn ${tab==="library"?"active":""}`} onClick={()=>{setTab("library");loadEntries();}}>Knowledge Library ({entries.length})</button>
+        <button className={`tab-btn ${tab==="file"?"active":""}`} onClick={()=>setTab("file")}>文件学习</button>
+        <button className={`tab-btn ${tab==="web"?"active":""}`} onClick={()=>setTab("web")}>网页学习</button>
+        <button className={`tab-btn ${tab==="library"?"active":""}`} onClick={()=>{setTab("library");loadEntries();}}>知识库（{entries.length}）</button>
       </div>
 
       {tab === "file" && (
         <div className="card-feature">
-          <div className="bible-edit-field"><label>Source Title</label><input className="text-input" value={sourceTitle} onChange={e=>setSourceTitle(e.target.value)} placeholder={selectedFile?.name || "Source name..."} /></div>
+          <div className="bible-edit-field"><label>来源标题</label><input className="text-input" value={sourceTitle} onChange={e=>setSourceTitle(e.target.value)} placeholder={selectedFile?.name || "来源名称..."} /></div>
           <input ref={fileInputRef} type="file" accept={learningFileAccept} onChange={handleFileSelected} style={{display:"none"}} />
           <div className="bible-edit-field">
-            <label>Source File</label>
+            <label>来源文件</label>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-              <button className="btn btn-secondary" onClick={()=>fileInputRef.current?.click()} disabled={learning}>Choose File</button>
-              <span className="text-meta">{selectedFile ? `${selectedFile.name} (${Math.ceil(selectedFile.size / 1024)} KB)` : "No file selected"}</span>
+              <button className="btn btn-secondary" onClick={()=>fileInputRef.current?.click()} disabled={learning}>选择文件</button>
+              <span className="text-meta">{selectedFile ? `${selectedFile.name} (${Math.ceil(selectedFile.size / 1024)} KB)` : "未选择文件"}</span>
             </div>
           </div>
-          <button className="btn btn-primary" onClick={handleLearnFile} disabled={learning||!selectedFile}>{learning?"Extracting...":"Extract Knowledge"}</button>
-          {result && <div className={`msg-banner ${result.includes("Error")?"msg-error":"msg-success"}`} style={{marginTop:8}}>{result}</div>}
+          <button className="btn btn-primary" onClick={handleLearnFile} disabled={learning||!selectedFile}>{learning?"提取中...":"提取知识"}</button>
+          {result && <div className={`msg-banner ${result.includes("错误")?"msg-error":"msg-success"}`} style={{marginTop:8}}>{result}</div>}
         </div>
       )}
 
       {tab === "web" && (
         <div className="card-feature">
-          <div className="bible-edit-field"><label>URL to learn from</label><input className="text-input" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://..." /></div>
-          <button className="btn btn-primary" onClick={handleLearnUrl} disabled={learning||!url.trim()}>{learning?"Fetching...":"Fetch & Learn"}</button>
-          {result && <div className={`msg-banner ${result.includes("Error")?"msg-error":"msg-success"}`} style={{marginTop:8}}>{result}</div>}
+          <div className="bible-edit-field"><label>学习 URL</label><input className="text-input" value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://..." /></div>
+          <button className="btn btn-primary" onClick={handleLearnUrl} disabled={learning||!url.trim()}>{learning?"抓取中...":"抓取并学习"}</button>
+          {result && <div className={`msg-banner ${result.includes("错误")?"msg-error":"msg-success"}`} style={{marginTop:8}}>{result}</div>}
         </div>
       )}
 
       {tab === "library" && (
         <div className="status-grid" style={{gridTemplateColumns:"1fr"}}>
-          {entries.length === 0 && <div className="text-meta">No learned patterns yet. Import a file or use Web Learn to build your knowledge base.</div>}
+          {entries.length === 0 && <div className="text-meta">还没有学习模式。导入文件或使用网页学习来建立知识库。</div>}
           {entries.map((e: any) => (
             <div key={e.id} className="card" style={{cursor:"pointer", borderLeft:`3px solid ${catColors[e.category]||"var(--hairline-dark)"}`}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}} onClick={()=>setExpandedId(expandedId===e.id?null:e.id)}>
@@ -1989,13 +1986,13 @@ function LearnPage() {
                     {e.source_title}
                   </span>
                 </div>
-                <button className="btn btn-sm btn-danger" onClick={(ev)=>{ev.stopPropagation();handleDelete(e.id);}}>Delete</button>
+                <button className="btn btn-sm btn-danger" onClick={(ev)=>{ev.stopPropagation();handleDelete(e.id);}}>删除</button>
               </div>
               {expandedId === e.id && (
                 <div style={{marginTop:8,padding:8,background:"var(--surface-dark-elevated)",borderRadius:"var(--radius-sm)"}}>
                   <div className="text-body">{e.pattern_description}</div>
                   {e.example_text && <div className="content-preview" style={{marginTop:8}}>{e.example_text.slice(0,500)}</div>}
-                  {e.application_notes && <div className="text-meta" style={{marginTop:4}}>Apply: {e.application_notes}</div>}
+                  {e.application_notes && <div className="text-meta" style={{marginTop:4}}>应用：{e.application_notes}</div>}
                 </div>
               )}
             </div>
@@ -2019,24 +2016,24 @@ function EmbeddingSettings({ settings, refreshSettings }: { settings: AppSetting
   }, [settings.embedding_provider]);
 
   const saveAndTest = async () => {
-    if (!embKey.trim()) { setResult("Error: Enter embedding API key"); return; }
-    setTesting(true); setResult("Testing...");
+    if (!embKey.trim()) { setResult("错误：请输入 Embedding API Key"); return; }
+    setTesting(true); setResult("测试中...");
     try {
       const r = await invoke<{ok:boolean;message:string;latency_ms?:number}>("test_embedding_provider", { provider: settings.embedding_provider, apiKey: embKey.trim(), baseUrl, model });
-      setResult(r.ok ? `Connected! (${r.latency_ms ?? "?"}ms, ${r.message})` : `FAIL: ${r.message}`);
+      setResult(r.ok ? `已连接（${r.latency_ms ?? "?"}ms，${r.message}）` : `失败：${r.message}`);
       if (r.ok) { setEmbKey(""); refreshSettings(); }
-    } catch (e) { setResult("Error: " + e); }
+    } catch (e) { setResult("错误：" + e); }
     setTesting(false);
   };
 
   return (
     <div className="card" style={{ marginTop: 12, borderLeft: "3px solid var(--primary)" }}>
-      <h4 style={{ fontFamily:"var(--font-display)",fontSize:16,fontWeight:300,color:"var(--on-dark)",marginBottom:12 }}>Embedding API Settings</h4>
+      <h4 style={{ fontFamily:"var(--font-display)",fontSize:16,fontWeight:300,color:"var(--on-dark)",marginBottom:12 }}>Embedding API 设置</h4>
       <div className="bible-edit-field"><label>Base URL</label><input className="text-input" value={baseUrl} onChange={e=>{setBaseUrl(e.target.value); invoke("update_settings",{settings:{...settings,embedding_base_url:e.target.value}}).then(refreshSettings);}} placeholder="https://..." /></div>
-      <div className="bible-edit-field"><label>Model</label><input className="text-input" value={model} onChange={e=>{setModel(e.target.value); invoke("update_settings",{settings:{...settings,embedding_model:e.target.value}}).then(refreshSettings);}} /></div>
-      <div className="bible-edit-field"><label>API Key</label><input className="text-input" type="password" value={embKey} onChange={e=>setEmbKey(e.target.value)} placeholder="Enter embedding API key..." /></div>
-      <button className="btn btn-primary" onClick={saveAndTest} disabled={testing||!embKey.trim()} style={{marginTop:8}}>{testing?"Testing...":"Save & Test Embedding"}</button>
-      {result && <div className={`msg-banner ${result.startsWith("Connected")?"msg-success":"msg-error"}`} style={{marginTop:8}}>{result}</div>}
+      <div className="bible-edit-field"><label>模型</label><input className="text-input" value={model} onChange={e=>{setModel(e.target.value); invoke("update_settings",{settings:{...settings,embedding_model:e.target.value}}).then(refreshSettings);}} /></div>
+      <div className="bible-edit-field"><label>API Key</label><input className="text-input" type="password" value={embKey} onChange={e=>setEmbKey(e.target.value)} placeholder="输入 Embedding API Key..." /></div>
+      <button className="btn btn-primary" onClick={saveAndTest} disabled={testing||!embKey.trim()} style={{marginTop:8}}>{testing?"测试中...":"保存并测试 Embedding"}</button>
+      {result && <div className={`msg-banner ${result.startsWith("已连接")?"msg-success":"msg-error"}`} style={{marginTop:8}}>{result}</div>}
     </div>
   );
 }

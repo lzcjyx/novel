@@ -6,8 +6,8 @@ use crate::export::markdown;
 use crate::models::*;
 use crate::prompts;
 use crate::workflow::{
-    canon_updater, learning, lock, prompt_rendering, prompt_runtime, review_agents, review_arbiter,
-    task_transaction, writing_context,
+    canon_updater, context_activation, hard_fact_ledger, learning, lock, prompt_rendering,
+    prompt_runtime, review_agents, review_arbiter, task_transaction, writing_context,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -174,6 +174,7 @@ fn review_usage_context(canon: &review_agents::CanonContext) -> String {
         "canon_rules_json": &canon.canon_rules_json,
         "timeline_json": &canon.timeline_json,
         "style_guide_json": &canon.style_guide_json,
+        "extension_review_rubrics_json": &canon.extension_review_rubrics_json,
         "blog_config_json": &canon.blog_config_json,
         "project_policy_json": &canon.project_policy_json,
     })
@@ -243,6 +244,15 @@ fn build_context_metadata(
         hasher.update(payload);
         hex::encode(hasher.finalize())
     };
+    let style_assets = context
+        .style
+        .get("style_assets")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let style_asset_ids = style_assets
+        .get("asset_ids")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
 
     let mut metadata = serde_json::json!({
         "selected_retrieval_source_keys": selected_retrieval_source_keys,
@@ -253,6 +263,8 @@ fn build_context_metadata(
         "selected_learning_entry_ids": selected_learning_entry_ids,
         "selected_learning_entries": selected_learning_entries,
         "learning_context_hash": learning_context_hash,
+        "style_asset_ids": style_asset_ids,
+        "style_assets": style_assets,
     });
 
     if let Some(prompt_runtime) = prompt_runtime {
@@ -541,7 +553,8 @@ pub async fn generate_next_chapter_with_stage_providers(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let writing_context = writing_context::build_writing_context(
+    let operator_controls_for_extension = operator_controls.clone();
+    let mut writing_context = writing_context::build_writing_context(
         db,
         &project,
         &plan,
@@ -550,11 +563,17 @@ pub async fn generate_next_chapter_with_stage_providers(
         retrieval_documents.clone(),
         operator_controls,
     )?;
-    let _after_context_metadata = run_extension_hook_for_job(
+    let after_context_metadata = run_extension_hook_for_job(
         db,
         &job_id,
         "after_context_build",
         build_context_metadata(&writing_context, None),
+    )?;
+    context_activation::append_extension_context_rules(
+        &mut writing_context.context_activation,
+        &after_context_metadata,
+        &plan,
+        operator_controls_for_extension.as_ref(),
     )?;
     let used_learning_ids = writing_context
         .learned_patterns
@@ -574,8 +593,12 @@ pub async fn generate_next_chapter_with_stage_providers(
     };
 
     // 10. Render draft writer prompt
-    let assembled_draft_prompt =
-        prompt_runtime::assemble_builtin_draft_prompt(&writing_context_json)?;
+    let extension_prompt_units =
+        prompt_runtime::extension_prompt_units_from_metadata(&after_context_metadata)?;
+    let assembled_draft_prompt = prompt_runtime::assemble_builtin_draft_prompt_with_extra_units(
+        &writing_context_json,
+        extension_prompt_units,
+    )?;
     let system_prompt = assembled_draft_prompt.system_prompt.clone();
     let user_prompt = assembled_draft_prompt.user_prompt.clone();
     let prompt_hash = {
@@ -769,6 +792,10 @@ pub async fn generate_next_chapter_with_stage_providers(
         canon_rules_json: serde_json::to_string(&canon_data.canon_rules).unwrap_or_default(),
         timeline_json: serde_json::to_string(&canon_data.timeline_events).unwrap_or_default(),
         style_guide_json: serde_json::to_string(&canon_data.style_guides).unwrap_or_default(),
+        extension_review_rubrics_json: serde_json::to_string(
+            &review_agents::extension_review_rubrics_from_metadata(&after_context_metadata),
+        )
+        .unwrap_or_default(),
         blog_config_json: serde_json::json!({
             "provider": project.blog_provider.as_deref().unwrap_or("local"),
             "status": "draft",
@@ -1220,6 +1247,27 @@ pub async fn generate_next_chapter_with_stage_providers(
         final_score,
         &final_decision,
     )?;
+    if final_status == "final" {
+        chapters::update_chapter_version_type(db, &current_version_id, "final")?;
+        let hard_facts = hard_fact_ledger::materialize_hard_facts_from_chapter_version(
+            db,
+            project_id,
+            &chapter_id,
+            &current_version_id,
+        )?;
+        for fact in &hard_facts {
+            task_transaction::record_task_owned_row(db, &job_id, "hard_facts", &fact.id)?;
+        }
+        emit_job_event(
+            db,
+            &job_id,
+            event_tx,
+            "hard_facts",
+            "done",
+            Some(&format!("{} hard facts materialized", hard_facts.len())),
+            84.0,
+        );
+    }
 
     // 16. Generate blog metadata if auto_publish
     let export_result = markdown::export_chapter_markdown(db, &chapter_id, &settings.data_dir);

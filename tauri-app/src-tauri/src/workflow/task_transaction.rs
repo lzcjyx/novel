@@ -16,6 +16,7 @@ pub struct TaskOwnedRows {
     pub timeline_events: Vec<String>,
     pub foreshadowing: Vec<String>,
     pub knowledge_graph_edges: Vec<String>,
+    pub hard_facts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +67,7 @@ impl TaskOwnedRows {
             "timeline_events" => Ok(&mut self.timeline_events),
             "foreshadowing" => Ok(&mut self.foreshadowing),
             "knowledge_graph_edges" => Ok(&mut self.knowledge_graph_edges),
+            "hard_facts" => Ok(&mut self.hard_facts),
             _ => Err(format!("Unsupported task-owned table: {}", table)),
         }
     }
@@ -83,12 +85,37 @@ impl TaskOwnedRows {
             "timeline_events" => Ok(&self.timeline_events),
             "foreshadowing" => Ok(&self.foreshadowing),
             "knowledge_graph_edges" => Ok(&self.knowledge_graph_edges),
+            "hard_facts" => Ok(&self.hard_facts),
             _ => Err(format!("Unsupported task-owned table: {}", table)),
         }
     }
 }
 
 fn metadata_with_failure(mut metadata: Value, reason: &str, completed_at: &str) -> Value {
+    let latest_phase = metadata
+        .get("phase_events")
+        .and_then(Value::as_array)
+        .and_then(|events| events.last())
+        .and_then(|event| event.get("step"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let latest_artifact_ids = metadata
+        .get("run_artifacts")
+        .and_then(|artifacts| artifacts.get("artifact_id"))
+        .and_then(Value::as_str)
+        .map(|artifact_id| json!([artifact_id]))
+        .unwrap_or_else(|| json!([]));
+    metadata["recovery_summary"] = json!({
+        "latest_phase": latest_phase,
+        "prompt_hash": metadata.get("prompt_hash").cloned().unwrap_or(Value::Null),
+        "context_hash": metadata.get("context_hash").cloned().unwrap_or(Value::Null),
+        "latest_artifact_ids": latest_artifact_ids,
+        "operator_recovery_options": ["retry", "repair", "audit"],
+        "resumable_operator_instruction": "Inspect artifacts and retry or repair from the last durable checkpoint; canonical memory is not updated automatically.",
+        "failure_reason": reason,
+        "updated_at": completed_at,
+    });
     metadata["phase_summary"]["last_status"] = json!("failed");
     metadata["phase_summary"]["failure_reason"] = json!(reason);
     metadata["phase_summary"]["completed_at"] = json!(completed_at);
@@ -300,6 +327,7 @@ pub fn rollback_generation_task(db: &Database, job_id: &str, reason: &str) -> Re
         "character_states",
         "timeline_events",
         "foreshadowing",
+        "hard_facts",
         "chapter_versions",
         "chapters",
     ] {

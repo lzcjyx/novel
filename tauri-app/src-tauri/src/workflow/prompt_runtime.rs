@@ -120,7 +120,37 @@ pub fn assemble_prompt_runtime(request: PromptRuntimeRequest) -> Result<Assemble
 pub fn assemble_builtin_draft_prompt(
     writing_context_json: &str,
 ) -> Result<AssembledPrompt, String> {
+    assemble_builtin_draft_prompt_with_extra_units(writing_context_json, vec![])
+}
+
+pub fn assemble_builtin_draft_prompt_with_extra_units(
+    writing_context_json: &str,
+    mut extra_units: Vec<PromptUnit>,
+) -> Result<AssembledPrompt, String> {
     let draft_template = crate::prompts::load_prompt("draft_writer")?;
+    let mut units = vec![
+        PromptUnit {
+            identifier: "draft_writer.system".to_string(),
+            role: "system".to_string(),
+            order: 10,
+            enabled: true,
+            injection_position: "system".to_string(),
+            generation_phase: "draft".to_string(),
+            content: draft_template,
+            metadata: serde_json::json!({"source": "built_in"}),
+        },
+        PromptUnit {
+            identifier: "draft_writer.user".to_string(),
+            role: "user".to_string(),
+            order: 20,
+            enabled: true,
+            injection_position: "user".to_string(),
+            generation_phase: "draft".to_string(),
+            content: DRAFT_WRITER_USER_INSTRUCTION.to_string(),
+            metadata: serde_json::json!({"source": "built_in"}),
+        },
+    ];
+    units.append(&mut extra_units);
     assemble_prompt_runtime(PromptRuntimeRequest {
         prompt_name: "draft_writer".to_string(),
         generation_phase: "draft".to_string(),
@@ -128,29 +158,73 @@ pub fn assemble_builtin_draft_prompt(
             "WRITING_CONTEXT_JSON".to_string(),
             writing_context_json.to_string(),
         )]),
-        units: vec![
-            PromptUnit {
-                identifier: "draft_writer.system".to_string(),
-                role: "system".to_string(),
-                order: 10,
-                enabled: true,
-                injection_position: "system".to_string(),
-                generation_phase: "draft".to_string(),
-                content: draft_template,
-                metadata: serde_json::json!({"source": "built_in"}),
-            },
-            PromptUnit {
-                identifier: "draft_writer.user".to_string(),
-                role: "user".to_string(),
-                order: 20,
-                enabled: true,
-                injection_position: "user".to_string(),
-                generation_phase: "draft".to_string(),
-                content: DRAFT_WRITER_USER_INSTRUCTION.to_string(),
-                metadata: serde_json::json!({"source": "built_in"}),
-            },
-        ],
+        units,
     })
+}
+
+pub fn extension_prompt_units_from_metadata(
+    workflow_metadata: &serde_json::Value,
+) -> Result<Vec<PromptUnit>, String> {
+    let Some(contributions) = workflow_metadata
+        .get("extension_contributions")
+        .and_then(|value| value.get("prompt_pack"))
+        .and_then(|value| value.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+
+    contributions
+        .iter()
+        .enumerate()
+        .map(|(index, contribution)| {
+            let payload = contribution.get("payload").ok_or_else(|| {
+                format!("prompt_pack contribution {} missing payload", index)
+            })?;
+            let identifier = payload
+                .get("unit_identifier")
+                .or_else(|| payload.get("identifier"))
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    format!("prompt_pack contribution {} missing unit_identifier", index)
+                })?;
+            let content = payload
+                .get("content")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| format!("prompt_pack contribution {} missing content", index))?;
+            Ok(PromptUnit {
+                identifier: identifier.to_string(),
+                role: payload
+                    .get("role")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("system")
+                    .to_string(),
+                order: payload
+                    .get("order")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(15) as i32,
+                enabled: payload
+                    .get("enabled")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true),
+                injection_position: payload
+                    .get("injection_position")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("system")
+                    .to_string(),
+                generation_phase: payload
+                    .get("generation_phase")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("draft")
+                    .to_string(),
+                content: content.to_string(),
+                metadata: serde_json::json!({
+                    "source": "extension_prompt_pack",
+                    "extension_id": contribution.get("extension_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "contribution_id": contribution.get("contribution_id").cloned().unwrap_or(serde_json::Value::Null),
+                }),
+            })
+        })
+        .collect()
 }
 
 pub fn assembled_prompt_preview_payload(assembled: &AssembledPrompt) -> serde_json::Value {

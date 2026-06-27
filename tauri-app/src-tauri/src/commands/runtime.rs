@@ -1,6 +1,7 @@
 use crate::models::AppSettings;
 use crate::AppState;
 use crate::{ai, db, extensions, get_embedding_provider, provider_config_for_workflow, workflow};
+use std::collections::HashMap;
 
 #[tauri::command]
 pub async fn get_next_chapter_context_preview(
@@ -107,6 +108,219 @@ pub async fn get_context_rules(
 }
 
 #[tauri::command]
+pub async fn generate_direction_candidates(
+    state: tauri::State<'_, AppState>,
+    project_id: Option<String>,
+    inspiration: String,
+    candidate_count: usize,
+) -> Result<Vec<db::director::DirectionCandidate>, String> {
+    let settings = db::settings::get_settings(&state.db)?;
+    let provider = provider_config_for_workflow(&state, &settings, "draft")?.build()?;
+    let model_profile_snapshot =
+        serde_json::to_value(&settings).map_err(|e| format!("Serialize settings: {}", e))?;
+    workflow::director_mode::generate_direction_candidates(
+        &state.db,
+        provider.as_ref(),
+        workflow::director_mode::DirectionGenerationRequest {
+            project_id,
+            inspiration,
+            candidate_count,
+            model_profile_snapshot,
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn list_direction_candidates(
+    state: tauri::State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<db::director::DirectionCandidate>, String> {
+    db::director::list_direction_candidates(&state.db, project_id.as_deref())
+}
+
+#[tauri::command]
+pub async fn select_direction_candidate(
+    state: tauri::State<'_, AppState>,
+    candidate_id: String,
+    revision_note: Option<String>,
+) -> Result<db::director::DirectionCandidate, String> {
+    workflow::director_mode::select_direction_candidate(
+        &state.db,
+        &candidate_id,
+        revision_note.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub async fn get_director_bootstrap_handoff(
+    state: tauri::State<'_, AppState>,
+    candidate_id: String,
+) -> Result<workflow::director_mode::DirectorBootstrapHandoff, String> {
+    workflow::director_mode::build_bootstrap_handoff(&state.db, &candidate_id)
+}
+
+#[tauri::command]
+pub async fn upsert_hard_fact(
+    state: tauri::State<'_, AppState>,
+    input: db::hard_facts::HardFactInput,
+) -> Result<String, String> {
+    db::hard_facts::upsert_hard_fact(&state.db, &input)
+}
+
+#[tauri::command]
+pub async fn list_hard_facts(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    active_only: bool,
+) -> Result<Vec<db::hard_facts::HardFact>, String> {
+    db::hard_facts::list_hard_facts(&state.db, &project_id, active_only)
+}
+
+#[tauri::command]
+pub async fn upsert_style_asset(
+    state: tauri::State<'_, AppState>,
+    input: db::style_assets::StyleAssetInput,
+) -> Result<String, String> {
+    db::style_assets::upsert_style_asset(&state.db, &input)
+}
+
+#[tauri::command]
+pub async fn list_style_assets(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    enabled_only: bool,
+) -> Result<Vec<db::style_assets::StyleAsset>, String> {
+    db::style_assets::list_style_assets(&state.db, &project_id, enabled_only)
+}
+
+#[tauri::command]
+pub async fn get_author_memory_banks(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<workflow::memory_banks::AuthorMemoryBanksSnapshot, String> {
+    workflow::memory_banks::build_author_memory_banks(&state.db, &project_id)
+}
+
+#[tauri::command]
+pub async fn upsert_user_recipe(
+    state: tauri::State<'_, AppState>,
+    input: workflow::operator_recipes::UserOperatorRecipeInput,
+) -> Result<String, String> {
+    workflow::operator_recipes::upsert_user_recipe(&state.db, &input)
+}
+
+#[tauri::command]
+pub async fn list_user_recipes(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    enabled_only: bool,
+) -> Result<Vec<workflow::operator_recipes::UserOperatorRecipe>, String> {
+    workflow::operator_recipes::list_user_recipes(&state.db, &project_id, enabled_only)
+}
+
+#[tauri::command]
+pub async fn create_feedback_revision_candidate(
+    state: tauri::State<'_, AppState>,
+    input: workflow::feedback_decisions::FeedbackRevisionCandidateInput,
+) -> Result<String, String> {
+    workflow::feedback_decisions::create_feedback_revision_candidate(&state.db, &input)
+}
+
+#[tauri::command]
+pub async fn list_feedback_decisions(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<Vec<workflow::feedback_decisions::FeedbackRevisionDecision>, String> {
+    workflow::feedback_decisions::list_feedback_decisions(&state.db, &project_id)
+}
+
+#[tauri::command]
+pub async fn decide_feedback_revision(
+    state: tauri::State<'_, AppState>,
+    decision_id: String,
+    action: String,
+    decision_note: Option<String>,
+) -> Result<workflow::feedback_decisions::FeedbackRevisionDecision, String> {
+    let action = match action.as_str() {
+        "approve" | "approved" | "Approve" => {
+            workflow::feedback_decisions::FeedbackDecisionAction::Approve
+        }
+        "reject" | "rejected" | "Reject" => {
+            workflow::feedback_decisions::FeedbackDecisionAction::Reject
+        }
+        "defer" | "deferred" | "Defer" => {
+            workflow::feedback_decisions::FeedbackDecisionAction::Defer
+        }
+        other => return Err(format!("Unsupported feedback decision action '{}'", other)),
+    };
+    workflow::feedback_decisions::decide_feedback_revision(
+        &state.db,
+        &decision_id,
+        action,
+        decision_note.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub async fn write_run_artifacts(
+    state: tauri::State<'_, AppState>,
+    job_id: String,
+    base_dir: String,
+    payload: workflow::run_artifacts::RunArtifactPayload,
+) -> Result<workflow::run_artifacts::RunArtifactManifest, String> {
+    workflow::run_artifacts::write_run_artifacts(
+        &state.db,
+        &job_id,
+        std::path::Path::new(&base_dir),
+        &payload,
+    )
+}
+
+#[tauri::command]
+pub async fn export_audit_sidecar(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    base_dir: String,
+) -> Result<crate::export::audit::AuditSidecarManifest, String> {
+    crate::export::audit::export_audit_sidecar(
+        &state.db,
+        &project_id,
+        std::path::Path::new(&base_dir),
+    )
+}
+
+#[tauri::command]
+pub async fn create_context_compression_summary(
+    state: tauri::State<'_, AppState>,
+    input: db::context_compression::ContextCompressionSummaryInput,
+) -> Result<String, String> {
+    db::context_compression::create_context_compression_summary(&state.db, &input)
+}
+
+#[tauri::command]
+pub async fn set_context_compression_status(
+    state: tauri::State<'_, AppState>,
+    summary_id: String,
+    status: String,
+) -> Result<(), String> {
+    db::context_compression::set_context_compression_status(&state.db, &summary_id, &status)
+}
+
+#[tauri::command]
+pub async fn list_context_compression_summaries(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+    approved_only: bool,
+) -> Result<Vec<db::context_compression::ContextCompressionSummary>, String> {
+    db::context_compression::list_context_compression_summaries(
+        &state.db,
+        &project_id,
+        approved_only,
+    )
+}
+
+#[tauri::command]
 pub async fn upsert_context_rule(
     state: tauri::State<'_, AppState>,
     input: db::context_rules::ContextRuleInput,
@@ -193,6 +407,48 @@ pub async fn import_prompt_preset_package(
     package: db::prompt_presets::PromptPresetPackage,
 ) -> Result<String, String> {
     db::prompt_presets::import_prompt_preset_package(&state.db, &package)
+}
+
+#[tauri::command]
+pub async fn create_prompt_preset_snapshot(
+    state: tauri::State<'_, AppState>,
+    preset_id: String,
+    note: Option<String>,
+) -> Result<db::prompt_presets::PromptPresetSnapshot, String> {
+    db::prompt_presets::create_prompt_preset_snapshot(&state.db, &preset_id, note.as_deref())
+}
+
+#[tauri::command]
+pub async fn list_prompt_preset_snapshots(
+    state: tauri::State<'_, AppState>,
+    preset_id: String,
+) -> Result<Vec<db::prompt_presets::PromptPresetSnapshot>, String> {
+    db::prompt_presets::list_prompt_preset_snapshots(&state.db, &preset_id)
+}
+
+#[tauri::command]
+pub async fn clone_prompt_preset(
+    state: tauri::State<'_, AppState>,
+    source_preset_id: String,
+    new_id: Option<String>,
+    new_name: String,
+) -> Result<String, String> {
+    db::prompt_presets::clone_prompt_preset(&state.db, &source_preset_id, new_id, &new_name)
+}
+
+#[tauri::command]
+pub async fn dry_run_prompt_preset(
+    state: tauri::State<'_, AppState>,
+    preset_id: String,
+    generation_phase: String,
+    temporary_overrides: HashMap<String, String>,
+) -> Result<workflow::prompt_runtime::AssembledPrompt, String> {
+    db::prompt_presets::dry_run_prompt_preset(
+        &state.db,
+        &preset_id,
+        &generation_phase,
+        temporary_overrides,
+    )
 }
 
 #[tauri::command]

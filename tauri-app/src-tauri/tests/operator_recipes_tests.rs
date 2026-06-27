@@ -254,6 +254,149 @@ fn recipe_invalid_action_fails_with_persisted_reason() {
         .contains("Unsupported recipe action"));
 }
 
+#[test]
+fn recipe_run_events_expose_step_io_duration_and_artifacts() {
+    let db = setup_db();
+    let (project_id, plan_id) = insert_project_with_plan(&db);
+    let recipe = tauri_app_lib::workflow::operator_recipes::OperatorRecipe {
+        id: "rich_recipe_events".to_string(),
+        name: "Rich recipe events".to_string(),
+        description: "Exercise non-generating recipe actions with structured run output."
+            .to_string(),
+        actions: vec![
+            tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                kind: "rerun_review_agent".to_string(),
+                label: "Style reviewer dry run".to_string(),
+                parameters: json!({"agent_name": "style_reviewer"}),
+            },
+            tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                kind: "repair_canon_consistency".to_string(),
+                label: "Canon repair preview".to_string(),
+                parameters: json!({"mode": "preview"}),
+            },
+            tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                kind: "summarize_source_to_canon_candidate".to_string(),
+                label: "Canon candidate summary".to_string(),
+                parameters: json!({"source_key": "chapter:1"}),
+            },
+        ],
+    };
+
+    let result = tauri_app_lib::workflow::operator_recipes::execute_recipe(
+        &db,
+        tauri_app_lib::workflow::operator_recipes::OperatorRecipeRunRequest {
+            project_id: project_id.clone(),
+            chapter_plan_id: plan_id,
+            recipe_id: recipe.id.clone(),
+        },
+        recipe,
+        |_action_index, _action| false,
+    )
+    .unwrap();
+
+    assert!(result.ok);
+    let done_events = result
+        .events
+        .iter()
+        .filter(|event| event.status == "done" && event.step != "operator_recipe")
+        .collect::<Vec<_>>();
+    assert_eq!(done_events.len(), 3);
+    for event in &done_events {
+        assert!(event.input["parameters"].is_object());
+        assert!(event.output["kind"].as_str().is_some());
+        assert!(event.duration_ms < 60_000);
+        assert!(
+            event
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("ready"),
+            "recipe actions should expose deterministic ready output instead of queued placeholders"
+        );
+        assert!(event
+            .artifact_refs
+            .iter()
+            .any(|artifact| artifact.starts_with("recipe_action:")));
+    }
+
+    let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
+    let metadata: Value = serde_json::from_str(&jobs[0].metadata).unwrap();
+    let step_outputs = metadata["operator_recipe"]["step_outputs"]
+        .as_array()
+        .expect("recipe step outputs should be persisted");
+    assert_eq!(step_outputs.len(), 3);
+    assert_eq!(
+        step_outputs[0]["output"]["kind"].as_str(),
+        Some("review_agent_preview")
+    );
+}
+
+#[test]
+fn user_operator_recipes_persist_and_validate_against_action_whitelist() {
+    let db = setup_db();
+    let (project_id, _plan_id) = insert_project_with_plan(&db);
+
+    let recipe_id = tauri_app_lib::workflow::operator_recipes::upsert_user_recipe(
+        &db,
+        &tauri_app_lib::workflow::operator_recipes::UserOperatorRecipeInput {
+            id: Some("user-recipe-1".to_string()),
+            project_id: project_id.clone(),
+            name: "Context then style review".to_string(),
+            description: "Build context and queue a style review".to_string(),
+            parameter_schema: json!({"type": "object", "properties": {"agent": {"type": "string"}}}),
+            actions: vec![
+                tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                    kind: "build_context_preview".to_string(),
+                    label: "Build context".to_string(),
+                    parameters: json!({}),
+                },
+                tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                    kind: "rerun_review_agent".to_string(),
+                    label: "Style review".to_string(),
+                    parameters: json!({"agent_name": "style_reviewer"}),
+                },
+            ],
+            enabled: true,
+            metadata: json!({"fixture": "user-recipe"}),
+        },
+    )
+    .expect("valid user recipe should persist");
+
+    assert_eq!(recipe_id, "user-recipe-1");
+    let recipes =
+        tauri_app_lib::workflow::operator_recipes::list_user_recipes(&db, &project_id, true)
+            .expect("user recipes should load");
+    assert_eq!(recipes.len(), 1);
+    assert_eq!(recipes[0].name, "Context then style review");
+    assert_eq!(recipes[0].actions.len(), 2);
+    assert_eq!(
+        recipes[0].parameter_schema["properties"]["agent"]["type"].as_str(),
+        Some("string")
+    );
+
+    let err = tauri_app_lib::workflow::operator_recipes::upsert_user_recipe(
+        &db,
+        &tauri_app_lib::workflow::operator_recipes::UserOperatorRecipeInput {
+            id: Some("bad-user-recipe".to_string()),
+            project_id,
+            name: "Unsafe".to_string(),
+            description: "Should fail".to_string(),
+            parameter_schema: json!({}),
+            actions: vec![
+                tauri_app_lib::workflow::operator_recipes::OperatorRecipeAction {
+                    kind: "arbitrary_js".to_string(),
+                    label: "Unsafe".to_string(),
+                    parameters: json!({}),
+                },
+            ],
+            enabled: true,
+            metadata: json!({}),
+        },
+    )
+    .expect_err("unknown action must be rejected before persistence");
+    assert!(err.contains("Unsupported recipe action"));
+}
+
 #[derive(Default)]
 struct RecipeProvider {
     calls: Arc<Mutex<usize>>,

@@ -574,6 +574,7 @@ fn retrieval_query_includes_plan_and_operator_controls() {
         must_include_beats: Some("platform sign".into()),
         forbidden_moves: Some("no confession".into()),
         style_emphasis: Some("quiet dread".into()),
+        ..Default::default()
     };
 
     let query =

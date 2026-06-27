@@ -21,3 +21,6 @@ export function positionFromClientPoint(
   clientX: number,
   clientY: number,
 ): GraphPosition;
+export function graphTypeLabel(type: string): string;
+export function graphNodeBadge(type: string): string;
+export function graphNodeDisplayLabel(label: string): string;

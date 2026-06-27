@@ -918,27 +918,7 @@ fn persist_learning_entries(
     project_id: &str,
     entries: &[LearningEntry],
 ) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
-    for entry in entries {
-        let id = Database::new_uuid();
-        conn.execute(
-            "INSERT OR IGNORE INTO learning_entries (id, project_id, source_type, source_url, source_title, category, pattern_name, pattern_description, example_text, application_notes, confidence)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                id,
-                project_id,
-                entry.source_type,
-                entry.source_url.as_deref(),
-                entry.source_title.as_deref(),
-                entry.category,
-                entry.pattern_name,
-                entry.pattern_description,
-                entry.example_text.as_deref(),
-                entry.application_notes.as_deref(),
-                entry.confidence
-            ],
-        ).map_err(|e| format!("Insert learning: {}", e))?;
-    }
+    workflow::learning::save_learning_entries_with_style_drafts(db, project_id, entries)?;
     Ok(())
 }
 
@@ -1112,6 +1092,16 @@ async fn update_bible_entry(
     let conn = state.db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let parsed: serde_json::Value =
         serde_json::from_str(&data).map_err(|e| format!("Invalid JSON: {}", e))?;
+    let json_text = |key: &str| -> Option<String> {
+        let value = &parsed[key];
+        if value.is_null() {
+            None
+        } else if let Some(text) = value.as_str() {
+            Some(text.to_string())
+        } else {
+            Some(value.to_string())
+        }
+    };
 
     match table.as_str() {
         "characters" => {
@@ -1177,6 +1167,48 @@ async fn update_bible_entry(
                 "UPDATE style_guides SET name=?1, style_text=?2, updated_at=datetime('now') WHERE id=?3",
                 rusqlite::params![parsed["name"].as_str().unwrap_or(""), parsed["style_text"].as_str(), id],
             ).map_err(|e| format!("Update style: {}", e))?;
+        }
+        "character_states" => {
+            conn.execute(
+                "UPDATE character_states
+                 SET physical_state=?1, emotional_state=?2, knowledge_state=?3,
+                     relationship_state=?4, location_id=?5, inventory=?6,
+                     open_conflicts=?7, metadata=?8, updated_at=datetime('now')
+                 WHERE id=?9",
+                rusqlite::params![
+                    parsed["physical_state"].as_str(),
+                    parsed["emotional_state"].as_str(),
+                    parsed["knowledge_state"].as_str(),
+                    json_text("relationship_state"),
+                    parsed["location_id"].as_str(),
+                    json_text("inventory"),
+                    json_text("open_conflicts"),
+                    json_text("metadata").unwrap_or_else(|| "{}".to_string()),
+                    id,
+                ],
+            )
+            .map_err(|e| format!("Update character state: {}", e))?;
+        }
+        "timeline_events" => {
+            conn.execute(
+                "UPDATE timeline_events
+                 SET event_time_label=?1, sequence=?2, event_summary=?3,
+                     involved_characters=?4, involved_locations=?5, consequences=?6,
+                     status=?7, metadata=?8, updated_at=datetime('now')
+                 WHERE id=?9",
+                rusqlite::params![
+                    parsed["event_time_label"].as_str(),
+                    parsed["sequence"].as_i64(),
+                    parsed["event_summary"].as_str(),
+                    json_text("involved_characters"),
+                    json_text("involved_locations"),
+                    json_text("consequences"),
+                    parsed["status"].as_str().unwrap_or("active"),
+                    json_text("metadata").unwrap_or_else(|| "{}".to_string()),
+                    id,
+                ],
+            )
+            .map_err(|e| format!("Update timeline event: {}", e))?;
         }
         _ => return Err(format!("Unknown bible table: {}", table)),
     }
@@ -1843,6 +1875,25 @@ pub fn run() {
             get_chapter_plans,
             commands::runtime::get_next_chapter_context_preview,
             commands::runtime::get_rag_health,
+            commands::runtime::generate_direction_candidates,
+            commands::runtime::list_direction_candidates,
+            commands::runtime::select_direction_candidate,
+            commands::runtime::get_director_bootstrap_handoff,
+            commands::runtime::upsert_hard_fact,
+            commands::runtime::list_hard_facts,
+            commands::runtime::upsert_style_asset,
+            commands::runtime::list_style_assets,
+            commands::runtime::get_author_memory_banks,
+            commands::runtime::upsert_user_recipe,
+            commands::runtime::list_user_recipes,
+            commands::runtime::create_feedback_revision_candidate,
+            commands::runtime::list_feedback_decisions,
+            commands::runtime::decide_feedback_revision,
+            commands::runtime::write_run_artifacts,
+            commands::runtime::export_audit_sidecar,
+            commands::runtime::create_context_compression_summary,
+            commands::runtime::set_context_compression_status,
+            commands::runtime::list_context_compression_summaries,
             get_chapters,
             get_chapter_versions,
             read_chapter_file,
@@ -1866,6 +1917,10 @@ pub fn run() {
             commands::runtime::list_prompt_presets,
             commands::runtime::get_prompt_preset_package,
             commands::runtime::import_prompt_preset_package,
+            commands::runtime::create_prompt_preset_snapshot,
+            commands::runtime::list_prompt_preset_snapshots,
+            commands::runtime::clone_prompt_preset,
+            commands::runtime::dry_run_prompt_preset,
             commands::runtime::upsert_model_profile,
             commands::runtime::get_model_profile,
             commands::runtime::list_model_profiles,

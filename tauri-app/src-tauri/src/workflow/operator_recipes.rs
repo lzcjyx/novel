@@ -4,6 +4,7 @@ use crate::db::{bible, chapters, generation_jobs, projects, settings};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorRecipe {
@@ -28,11 +29,45 @@ pub struct OperatorRecipeRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserOperatorRecipeInput {
+    pub id: Option<String>,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub parameter_schema: serde_json::Value,
+    pub actions: Vec<OperatorRecipeAction>,
+    pub enabled: bool,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserOperatorRecipe {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub parameter_schema: serde_json::Value,
+    pub actions: Vec<OperatorRecipeAction>,
+    pub enabled: bool,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorRecipeRunEvent {
     pub step: String,
     pub status: String,
     pub detail: Option<String>,
     pub progress_pct: f64,
+    #[serde(default)]
+    pub input: Value,
+    #[serde(default)]
+    pub output: Value,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub artifact_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +90,111 @@ const ALLOWED_ACTION_KINDS: &[&str] = &[
 
 pub fn is_allowed_action_kind(kind: &str) -> bool {
     ALLOWED_ACTION_KINDS.contains(&kind)
+}
+
+#[derive(Debug, Clone)]
+struct ActionOutcome {
+    detail: String,
+    output: Value,
+    artifact_refs: Vec<String>,
+}
+
+pub fn upsert_user_recipe(
+    db: &Database,
+    input: &UserOperatorRecipeInput,
+) -> Result<String, String> {
+    if input.project_id.trim().is_empty() {
+        return Err("user recipe project_id is required".to_string());
+    }
+    if input.name.trim().is_empty() {
+        return Err("user recipe name is required".to_string());
+    }
+    if input.actions.is_empty() {
+        return Err("user recipe requires at least one action".to_string());
+    }
+    for action in &input.actions {
+        if !is_allowed_action_kind(&action.kind) {
+            return Err(format!("Unsupported recipe action '{}'", action.kind));
+        }
+    }
+
+    let id = input.id.clone().unwrap_or_else(Database::new_uuid);
+    let parameter_schema = serde_json::to_string(&input.parameter_schema)
+        .map_err(|e| format!("Serialize user recipe parameter schema: {}", e))?;
+    let actions = serde_json::to_string(&input.actions)
+        .map_err(|e| format!("Serialize user recipe actions: {}", e))?;
+    let metadata = serde_json::to_string(&input.metadata)
+        .map_err(|e| format!("Serialize user recipe metadata: {}", e))?;
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    conn.execute(
+        "INSERT INTO user_operator_recipes
+            (id, project_id, name, description, parameter_schema, actions, enabled, metadata, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+            project_id = excluded.project_id,
+            name = excluded.name,
+            description = excluded.description,
+            parameter_schema = excluded.parameter_schema,
+            actions = excluded.actions,
+            enabled = excluded.enabled,
+            metadata = excluded.metadata,
+            updated_at = datetime('now')",
+        rusqlite::params![
+            id,
+            input.project_id.trim(),
+            input.name.trim(),
+            input.description.trim(),
+            parameter_schema,
+            actions,
+            input.enabled as i32,
+            metadata,
+        ],
+    )
+    .map_err(|e| format!("Upsert user recipe: {}", e))?;
+    Ok(id)
+}
+
+pub fn list_user_recipes(
+    db: &Database,
+    project_id: &str,
+    enabled_only: bool,
+) -> Result<Vec<UserOperatorRecipe>, String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let sql = if enabled_only {
+        "SELECT id, project_id, name, description, parameter_schema, actions, enabled, metadata
+         FROM user_operator_recipes
+         WHERE project_id = ?1 AND enabled = 1
+         ORDER BY name ASC, id ASC"
+    } else {
+        "SELECT id, project_id, name, description, parameter_schema, actions, enabled, metadata
+         FROM user_operator_recipes
+         WHERE project_id = ?1
+         ORDER BY name ASC, id ASC"
+    };
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("Prepare user recipes: {}", e))?;
+    let recipes = stmt
+        .query_map(rusqlite::params![project_id], |row| {
+            let parameter_schema_raw: String = row.get(4)?;
+            let actions_raw: String = row.get(5)?;
+            let metadata_raw: String = row.get(7)?;
+            Ok(UserOperatorRecipe {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                parameter_schema: serde_json::from_str(&parameter_schema_raw)
+                    .unwrap_or_else(|_| json!({})),
+                actions: serde_json::from_str(&actions_raw).unwrap_or_default(),
+                enabled: row.get::<_, i32>(6)? != 0,
+                metadata: serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({})),
+            })
+        })
+        .map_err(|e| format!("Query user recipes: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect user recipes: {}", e))?;
+    Ok(recipes)
 }
 
 fn action(kind: &str, label: &str, parameters: serde_json::Value) -> OperatorRecipeAction {
@@ -139,6 +279,58 @@ pub fn built_in_recipes() -> Vec<OperatorRecipe> {
             )],
         },
     ]
+}
+
+pub fn extension_recipes_from_metadata(metadata: &Value) -> Result<Vec<OperatorRecipe>, String> {
+    crate::extensions::host::extension_contribution_payloads(metadata, "recipe_pack")
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| {
+            let recipe_id = payload
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("recipe_pack contribution {} missing id", index))?
+                .to_string();
+            let name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&recipe_id)
+                .to_string();
+            let description = payload
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let actions = payload
+                .get("actions")
+                .cloned()
+                .ok_or_else(|| format!("recipe_pack contribution {} missing actions", index))
+                .and_then(|value| {
+                    serde_json::from_value::<Vec<OperatorRecipeAction>>(value)
+                        .map_err(|e| format!("Parse recipe_pack actions: {}", e))
+                })?;
+            if actions.is_empty() {
+                return Err(format!(
+                    "recipe_pack contribution {} requires at least one action",
+                    index
+                ));
+            }
+            for action in &actions {
+                if !is_allowed_action_kind(&action.kind) {
+                    return Err(format!(
+                        "recipe_pack contribution {} uses unsupported action '{}'",
+                        index, action.kind
+                    ));
+                }
+            }
+            Ok(OperatorRecipe {
+                id: recipe_id,
+                name,
+                description,
+                actions,
+            })
+        })
+        .collect()
 }
 
 pub fn execute_builtin_recipe(
@@ -231,17 +423,23 @@ pub async fn execute_recipe_with_provider(
             });
         }
 
-        let action_detail =
+        let action_started = Instant::now();
+        let action_outcome =
             execute_recipe_action_with_provider(db, &request, &job_id, &recipe, action, provider)
                 .await?;
-        record_recipe_event(
+        record_recipe_event_with_io(
             db,
             &job_id,
             &mut events,
             &action.kind,
             "done",
-            Some(&action_detail),
+            Some(&action_outcome.detail),
             5.0 + (((action_index + 1) as f64) / action_count * 90.0),
+            action_input(action),
+            action_outcome.output,
+            None,
+            elapsed_ms(action_started),
+            action_outcome.artifact_refs,
         )?;
     }
 
@@ -347,15 +545,21 @@ where
             });
         }
 
-        let action_detail = execute_recipe_action(db, &request, &job_id, &recipe, action)?;
-        record_recipe_event(
+        let action_started = Instant::now();
+        let action_outcome = execute_recipe_action(db, &request, &job_id, &recipe, action)?;
+        record_recipe_event_with_io(
             db,
             &job_id,
             &mut events,
             &action.kind,
             "done",
-            Some(&action_detail),
+            Some(&action_outcome.detail),
             5.0 + (((action_index + 1) as f64) / action_count * 90.0),
+            action_input(action),
+            action_outcome.output,
+            None,
+            elapsed_ms(action_started),
+            action_outcome.artifact_refs,
         )?;
     }
 
@@ -386,24 +590,84 @@ fn execute_recipe_action(
     job_id: &str,
     recipe: &OperatorRecipe,
     action: &OperatorRecipeAction,
-) -> Result<String, String> {
+) -> Result<ActionOutcome, String> {
     match action.kind.as_str() {
         "build_context_preview" => {
             let preview = build_context_preview(db, request)?;
+            let prompt_name = preview["prompt_runtime"]["prompt_name"]
+                .as_str()
+                .unwrap_or("draft_writer")
+                .to_string();
             record_recipe_metadata(db, job_id, recipe, Some(preview))?;
-            Ok("Context preview assembled without generating prose".to_string())
+            Ok(ActionOutcome {
+                detail: "Context preview ready without generating prose".to_string(),
+                output: json!({
+                    "kind": "context_preview",
+                    "prompt_name": prompt_name,
+                    "chapter_plan_id": request.chapter_plan_id,
+                }),
+                artifact_refs: vec![format!("recipe_action:{}:context_preview", job_id)],
+            })
         }
-        "generate_draft_candidate" => Ok(format!(
-            "Draft candidate {} persisted",
-            create_draft_candidate_from_context(db, request, job_id, recipe, action)?
-        )),
-        "rerun_review_agent" => Ok(format!(
-            "Review action queued with parameters {}",
-            action.parameters
-        )),
-        "repair_canon_consistency" => Ok("Canon consistency repair action queued".to_string()),
+        "generate_draft_candidate" => {
+            let (candidate_number, candidate_id) =
+                create_draft_candidate_from_context(db, request, job_id, recipe, action)?;
+            Ok(ActionOutcome {
+                detail: format!("Draft candidate {} persisted", candidate_number),
+                output: json!({
+                    "kind": "draft_candidate",
+                    "candidate_number": candidate_number,
+                    "candidate_id": candidate_id,
+                    "chapter_plan_id": request.chapter_plan_id,
+                }),
+                artifact_refs: vec![format!("draft_candidate:{}", candidate_id)],
+            })
+        }
+        "rerun_review_agent" => {
+            let agent_name = action
+                .parameters
+                .get("agent_name")
+                .and_then(Value::as_str)
+                .unwrap_or("style_reviewer");
+            Ok(ActionOutcome {
+                detail: format!("Review agent preview ready for {}", agent_name),
+                output: json!({
+                    "kind": "review_agent_preview",
+                    "agent_name": agent_name,
+                    "chapter_plan_id": request.chapter_plan_id,
+                    "status": "ready",
+                }),
+                artifact_refs: vec![format!("recipe_action:{}:rerun_review_agent", job_id)],
+            })
+        }
+        "repair_canon_consistency" => Ok(ActionOutcome {
+            detail: "Canon consistency repair preview ready".to_string(),
+            output: json!({
+                "kind": "canon_repair_preview",
+                "chapter_plan_id": request.chapter_plan_id,
+                "status": "ready",
+            }),
+            artifact_refs: vec![format!("recipe_action:{}:repair_canon_consistency", job_id)],
+        }),
         "summarize_source_to_canon_candidate" => {
-            Ok("Canon candidate summary action queued".to_string())
+            let source_key = action
+                .parameters
+                .get("source_key")
+                .and_then(Value::as_str)
+                .unwrap_or("manual_source");
+            Ok(ActionOutcome {
+                detail: "Canon candidate summary preview ready".to_string(),
+                output: json!({
+                    "kind": "canon_candidate_summary_preview",
+                    "source_key": source_key,
+                    "chapter_plan_id": request.chapter_plan_id,
+                    "status": "ready",
+                }),
+                artifact_refs: vec![format!(
+                    "recipe_action:{}:summarize_source_to_canon_candidate",
+                    job_id
+                )],
+            })
         }
         other => Err(format!("Unsupported recipe action '{}'", other)),
     }
@@ -416,13 +680,24 @@ async fn execute_recipe_action_with_provider(
     recipe: &OperatorRecipe,
     action: &OperatorRecipeAction,
     provider: &dyn ModelClient,
-) -> Result<String, String> {
+) -> Result<ActionOutcome, String> {
     match action.kind.as_str() {
-        "generate_draft_candidate" => Ok(format!(
-            "Draft candidate {} persisted",
-            create_draft_candidate_with_provider(db, request, job_id, recipe, action, provider)
-                .await?
-        )),
+        "generate_draft_candidate" => {
+            let (candidate_number, candidate_id) =
+                create_draft_candidate_with_provider(db, request, job_id, recipe, action, provider)
+                    .await?;
+            Ok(ActionOutcome {
+                detail: format!("Draft candidate {} persisted", candidate_number),
+                output: json!({
+                    "kind": "draft_candidate",
+                    "candidate_number": candidate_number,
+                    "candidate_id": candidate_id,
+                    "chapter_plan_id": request.chapter_plan_id,
+                    "provider_generated": true,
+                }),
+                artifact_refs: vec![format!("draft_candidate:{}", candidate_id)],
+            })
+        }
         _ => execute_recipe_action(db, request, job_id, recipe, action),
     }
 }
@@ -434,7 +709,7 @@ async fn create_draft_candidate_with_provider(
     recipe: &OperatorRecipe,
     action: &OperatorRecipeAction,
     provider: &dyn ModelClient,
-) -> Result<i32, String> {
+) -> Result<(i32, String), String> {
     let candidate_number = action
         .parameters
         .get("candidate_number")
@@ -503,7 +778,7 @@ async fn create_draft_candidate_with_provider(
         "prompt_runtime": prompt_runtime_for_hash,
     }))
     .map_err(|e| format!("Serialize provider candidate prompt: {}", e))?;
-    crate::db::draft_alternatives::create_draft_candidate(
+    let candidate_id = crate::db::draft_alternatives::create_draft_candidate(
         db,
         &crate::db::draft_alternatives::DraftCandidateInput {
             project_id: request.project_id.clone(),
@@ -531,7 +806,7 @@ async fn create_draft_candidate_with_provider(
         },
     )?;
     record_recipe_metadata(db, job_id, recipe, Some(preview))?;
-    Ok(candidate_number)
+    Ok((candidate_number, candidate_id))
 }
 
 fn create_draft_candidate_from_context(
@@ -540,7 +815,7 @@ fn create_draft_candidate_from_context(
     job_id: &str,
     recipe: &OperatorRecipe,
     action: &OperatorRecipeAction,
-) -> Result<i32, String> {
+) -> Result<(i32, String), String> {
     let candidate_number = action
         .parameters
         .get("candidate_number")
@@ -571,7 +846,7 @@ fn create_draft_candidate_from_context(
         candidate_number, chapter_title
     );
     let word_count = body_markdown.chars().count() as i32;
-    crate::db::draft_alternatives::create_draft_candidate(
+    let candidate_id = crate::db::draft_alternatives::create_draft_candidate(
         db,
         &crate::db::draft_alternatives::DraftCandidateInput {
             project_id: request.project_id.clone(),
@@ -601,13 +876,25 @@ fn create_draft_candidate_from_context(
         },
     )?;
     record_recipe_metadata(db, job_id, recipe, Some(preview))?;
-    Ok(candidate_number)
+    Ok((candidate_number, candidate_id))
 }
 
 fn stable_hash(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn action_input(action: &OperatorRecipeAction) -> Value {
+    json!({
+        "kind": action.kind,
+        "label": action.label,
+        "parameters": action.parameters,
+    })
 }
 
 fn build_context_preview(
@@ -661,7 +948,96 @@ fn record_recipe_event(
         status: status.to_string(),
         detail: detail.map(str::to_string),
         progress_pct,
+        input: json!({}),
+        output: json!({}),
+        error: None,
+        duration_ms: 0,
+        artifact_refs: Vec::new(),
     });
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_recipe_event_with_io(
+    db: &Database,
+    job_id: &str,
+    events: &mut Vec<OperatorRecipeRunEvent>,
+    step: &str,
+    status: &str,
+    detail: Option<&str>,
+    progress_pct: f64,
+    input: Value,
+    output: Value,
+    error: Option<String>,
+    duration_ms: u64,
+    artifact_refs: Vec<String>,
+) -> Result<(), String> {
+    generation_jobs::record_job_phase_event(db, job_id, step, status, detail, progress_pct)?;
+    let event = OperatorRecipeRunEvent {
+        step: step.to_string(),
+        status: status.to_string(),
+        detail: detail.map(str::to_string),
+        progress_pct,
+        input,
+        output,
+        error,
+        duration_ms,
+        artifact_refs,
+    };
+    if event.status == "done" && event.step != "operator_recipe" {
+        append_recipe_step_output(db, job_id, &event)?;
+    }
+    events.push(event);
+    Ok(())
+}
+
+fn append_recipe_step_output(
+    db: &Database,
+    job_id: &str,
+    event: &OperatorRecipeRunEvent,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let metadata_raw: String = conn
+        .query_row(
+            "SELECT metadata FROM generation_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Load recipe step metadata: {}", e))?;
+    let mut metadata = serde_json::from_str::<Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+    if !metadata.is_object() {
+        metadata = json!({});
+    }
+    if !metadata
+        .get("operator_recipe")
+        .is_some_and(|value| value.is_object())
+    {
+        metadata["operator_recipe"] = json!({});
+    }
+    if !metadata["operator_recipe"]
+        .get("step_outputs")
+        .is_some_and(|value| value.is_array())
+    {
+        metadata["operator_recipe"]["step_outputs"] = json!([]);
+    }
+    metadata["operator_recipe"]["step_outputs"]
+        .as_array_mut()
+        .ok_or_else(|| "operator_recipe.step_outputs must be an array".to_string())?
+        .push(json!({
+            "step": event.step,
+            "status": event.status,
+            "detail": event.detail,
+            "input": event.input,
+            "output": event.output,
+            "error": event.error,
+            "duration_ms": event.duration_ms,
+            "artifact_refs": event.artifact_refs,
+        }));
+    conn.execute(
+        "UPDATE generation_jobs SET metadata = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![metadata.to_string(), job_id],
+    )
+    .map_err(|e| format!("Persist recipe step output: {}", e))?;
     Ok(())
 }
 
@@ -688,11 +1064,17 @@ fn record_recipe_metadata(
         .get("operator_recipe")
         .and_then(|value| value.get("context_preview"))
         .cloned();
+    let existing_step_outputs = metadata
+        .get("operator_recipe")
+        .and_then(|value| value.get("step_outputs"))
+        .cloned()
+        .unwrap_or_else(|| json!([]));
     metadata["operator_recipe"] = json!({
         "recipe_id": recipe.id,
         "name": recipe.name,
         "actions": recipe.actions,
         "context_preview": context_preview.or(existing_preview),
+        "step_outputs": existing_step_outputs,
     });
 
     conn.execute(

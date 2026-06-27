@@ -1,6 +1,34 @@
 const GRAPH_MIN = 7;
 const GRAPH_MAX = 93;
 
+const GRAPH_TYPE_LABELS = {
+  character: "人物",
+  location: "地点",
+  organization: "组织",
+  item: "物品",
+  plot_thread: "剧情线",
+  foreshadowing: "伏笔",
+  canon_rule: "规则",
+  timeline_event: "时间线",
+  world_lore: "世界观",
+  magic_system: "力量体系",
+  magic_or_power_system: "力量体系",
+};
+
+const GRAPH_TYPE_BADGES = {
+  character: "人物",
+  location: "地点",
+  organization: "组织",
+  item: "物品",
+  plot_thread: "剧情",
+  foreshadowing: "伏笔",
+  canon_rule: "规则",
+  timeline_event: "时间",
+  world_lore: "世界",
+  magic_system: "力量",
+  magic_or_power_system: "力量",
+};
+
 function hashString(value) {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -56,4 +84,18 @@ export function positionFromClientPoint(rect, clientX, clientY) {
     x: ((clientX - rect.left) / width) * 100,
     y: ((clientY - rect.top) / height) * 100,
   });
+}
+
+export function graphTypeLabel(type) {
+  return GRAPH_TYPE_LABELS[type] || "未知节点";
+}
+
+export function graphNodeBadge(type) {
+  return GRAPH_TYPE_BADGES[type] || "节点";
+}
+
+export function graphNodeDisplayLabel(label) {
+  const text = String(label || "").trim();
+  if (!text) return "未命名";
+  return text.length > 8 ? `${text.slice(0, 6)}...` : text;
 }

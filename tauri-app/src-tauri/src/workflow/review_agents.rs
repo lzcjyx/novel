@@ -21,8 +21,21 @@ pub struct CanonContext {
     pub canon_rules_json: String,
     pub timeline_json: String,
     pub style_guide_json: String,
+    pub extension_review_rubrics_json: String,
     pub blog_config_json: String,
     pub project_policy_json: String,
+}
+
+pub fn extension_review_rubrics_from_metadata(
+    metadata: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut rubrics =
+        crate::extensions::host::extension_contribution_payloads(metadata, "review_rubric_pack");
+    rubrics.extend(crate::extensions::host::extension_contribution_payloads(
+        metadata,
+        "review_rubric",
+    ));
+    rubrics
 }
 
 pub async fn run_review_agents(
@@ -349,6 +362,10 @@ async fn run_single_review(
         canon.character_states_json.clone(),
     );
     vars.insert("STYLE_GUIDE_JSON".into(), canon.style_guide_json.clone());
+    vars.insert(
+        "EXTENSION_REVIEW_RUBRICS_JSON".into(),
+        canon.extension_review_rubrics_json.clone(),
+    );
     vars.insert("BLOG_CONFIG_JSON".into(), canon.blog_config_json.clone());
     vars.insert(
         "PROJECT_POLICY_JSON".into(),

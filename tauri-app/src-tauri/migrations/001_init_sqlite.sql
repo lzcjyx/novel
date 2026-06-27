@@ -744,6 +744,35 @@ CREATE TABLE IF NOT EXISTS prompt_preset_units (
 CREATE INDEX IF NOT EXISTS idx_prompt_units_preset ON prompt_preset_units(preset_id, unit_order);
 CREATE INDEX IF NOT EXISTS idx_prompt_units_phase ON prompt_preset_units(preset_id, generation_phase);
 
+CREATE TABLE IF NOT EXISTS prompt_preset_snapshots (
+    id TEXT PRIMARY KEY,
+    preset_id TEXT NOT NULL REFERENCES prompt_presets(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    prompt_hash TEXT NOT NULL,
+    note TEXT,
+    package_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(preset_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_snapshots_preset ON prompt_preset_snapshots(preset_id, version);
+
+CREATE TABLE IF NOT EXISTS context_compression_summaries (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_job_id TEXT,
+    summary_text TEXT NOT NULL,
+    prompt_hash TEXT,
+    context_hash TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_compression_project ON context_compression_summaries(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_context_compression_job ON context_compression_summaries(source_job_id);
+
 -- ============================================================================
 -- 31. context_rules — deterministic canon activation rules
 -- ============================================================================
@@ -847,3 +876,150 @@ CREATE TABLE IF NOT EXISTS extension_packages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_extension_packages_enabled ON extension_packages(enabled, status);
+
+-- ============================================================================
+-- 35. direction_candidates — staged director-mode book directions
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS direction_candidates (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    inspiration TEXT NOT NULL,
+    title_options TEXT NOT NULL DEFAULT '[]',
+    positioning TEXT NOT NULL,
+    target_reader TEXT NOT NULL,
+    core_hook TEXT NOT NULL,
+    series_promise TEXT NOT NULL,
+    first_30_chapter_promise TEXT NOT NULL,
+    world_seed TEXT NOT NULL DEFAULT '{}',
+    character_seed TEXT NOT NULL DEFAULT '{}',
+    volume_strategy TEXT NOT NULL DEFAULT '[]',
+    golden_three_chapters TEXT NOT NULL DEFAULT '[]',
+    checkpoint_status TEXT NOT NULL DEFAULT 'draft',
+    revision_note TEXT,
+    selected INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_direction_candidates_project ON direction_candidates(project_id);
+CREATE INDEX IF NOT EXISTS idx_direction_candidates_selected ON direction_candidates(project_id, selected);
+
+-- ============================================================================
+-- 36. hard_facts — explicit ledger for cross-chapter hard facts
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS hard_facts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    chapter_id TEXT REFERENCES chapters(id) ON DELETE SET NULL,
+    chapter_version_id TEXT REFERENCES chapter_versions(id) ON DELETE SET NULL,
+    fact_type TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object TEXT NOT NULL,
+    value_text TEXT NOT NULL,
+    certainty REAL NOT NULL DEFAULT 1.0,
+    source_quote TEXT,
+    scope TEXT NOT NULL DEFAULT 'project',
+    status TEXT NOT NULL DEFAULT 'active',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_hard_facts_project ON hard_facts(project_id);
+CREATE INDEX IF NOT EXISTS idx_hard_facts_status ON hard_facts(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_hard_facts_subject ON hard_facts(project_id, subject, predicate);
+
+-- ============================================================================
+-- 37. style_assets — reusable prose and anti-AI writing assets
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS style_assets (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    asset_type TEXT NOT NULL,
+    scope_type TEXT NOT NULL DEFAULT 'project',
+    scope_id TEXT,
+    features TEXT NOT NULL DEFAULT '{}',
+    positive_examples TEXT NOT NULL DEFAULT '[]',
+    negative_examples TEXT NOT NULL DEFAULT '[]',
+    anti_ai_rules TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 0,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_style_assets_project ON style_assets(project_id);
+CREATE INDEX IF NOT EXISTS idx_style_assets_enabled ON style_assets(project_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_style_assets_priority ON style_assets(project_id, priority);
+
+-- ============================================================================
+-- 38. user_operator_recipes — author-authored declarative recipes
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS user_operator_recipes (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    parameter_schema TEXT NOT NULL DEFAULT '{}',
+    actions TEXT NOT NULL DEFAULT '[]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_operator_recipes_project ON user_operator_recipes(project_id);
+CREATE INDEX IF NOT EXISTS idx_user_operator_recipes_enabled ON user_operator_recipes(project_id, enabled);
+
+-- ============================================================================
+-- 39. feedback_revision_decisions — reader feedback approval loop
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS feedback_revision_decisions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    feedback_id TEXT NOT NULL REFERENCES reader_feedback(id) ON DELETE CASCADE,
+    chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    body_markdown TEXT NOT NULL,
+    summary TEXT,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','approved','rejected','deferred')),
+    decision_note TEXT,
+    resulting_chapter_version_id TEXT REFERENCES chapter_versions(id) ON DELETE SET NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_decisions_project ON feedback_revision_decisions(project_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_decisions_feedback ON feedback_revision_decisions(feedback_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_decisions_status ON feedback_revision_decisions(project_id, status);
+
+-- ============================================================================
+-- 40. run_artifacts — inspectable local run artifact manifests
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS run_artifacts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL REFERENCES generation_jobs(id) ON DELETE CASCADE,
+    dir_path TEXT NOT NULL,
+    manifest TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'written',
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(job_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_project ON run_artifacts(project_id);
+CREATE INDEX IF NOT EXISTS idx_run_artifacts_job ON run_artifacts(job_id);

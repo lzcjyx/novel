@@ -10,6 +10,7 @@ pub fn run_migrations(db: &Database) -> Result<(), String> {
 
     migrate_generation_jobs_cancelled_status(&conn)?;
     migrate_chapter_versions_accepted_candidate_type(&conn)?;
+    repair_chapter_version_temp_foreign_keys(&conn)?;
 
     let vector_columns = vector_document_columns(&conn)?;
     ensure_vector_column(
@@ -178,7 +179,18 @@ fn migrate_chapter_versions_accepted_candidate_type(
         return Ok(());
     }
 
-    conn.execute_batch(
+    let previous_legacy_alter_table = conn
+        .query_row("PRAGMA legacy_alter_table", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0);
+    conn.execute_batch("PRAGMA legacy_alter_table = ON;")
+        .map_err(|e| {
+            format!(
+                "Enable legacy alter table for chapter_versions migration: {}",
+                e
+            )
+        })?;
+
+    let migration_result = conn.execute_batch(
         "
         PRAGMA foreign_keys = OFF;
         DROP TABLE IF EXISTS chapter_versions_old_type_migration;
@@ -216,8 +228,152 @@ fn migrate_chapter_versions_accepted_candidate_type(
         CREATE INDEX IF NOT EXISTS idx_chapter_versions_number ON chapter_versions(chapter_id, version_number);
         PRAGMA foreign_keys = ON;
         ",
-    )
-    .map_err(|e| format!("Migrate chapter_versions accepted_candidate type: {}", e))?;
+    );
+
+    conn.execute_batch(&format!(
+        "PRAGMA legacy_alter_table = {};",
+        if previous_legacy_alter_table != 0 {
+            "ON"
+        } else {
+            "OFF"
+        }
+    ))
+    .map_err(|e| {
+        format!(
+            "Restore legacy alter table after chapter_versions migration: {}",
+            e
+        )
+    })?;
+
+    migration_result
+        .map_err(|e| format!("Migrate chapter_versions accepted_candidate type: {}", e))?;
 
     Ok(())
+}
+
+fn repair_chapter_version_temp_foreign_keys(conn: &rusqlite::Connection) -> Result<(), String> {
+    const TEMP_TABLE: &str = "chapter_versions_old_type_migration";
+    const TABLES: &[&str] = &[
+        "agent_reviews",
+        "review_scores",
+        "publication_queue",
+        "hard_facts",
+        "feedback_revision_decisions",
+    ];
+
+    for table in TABLES {
+        let table_sql = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [*table],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|e| format!("Read {} schema for chapter_versions repair: {}", table, e))?;
+        let Some(table_sql) = table_sql else {
+            continue;
+        };
+        if !table_sql.contains(TEMP_TABLE) {
+            continue;
+        }
+
+        rebuild_table_with_repaired_chapter_version_fk(conn, table, &table_sql)?;
+    }
+
+    Ok(())
+}
+
+fn rebuild_table_with_repaired_chapter_version_fk(
+    conn: &rusqlite::Connection,
+    table: &str,
+    table_sql: &str,
+) -> Result<(), String> {
+    let repair_table = format!("{}_chapter_version_fk_repair", table);
+    let index_sql = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL
+                 ORDER BY name",
+            )
+            .map_err(|e| format!("Prepare {} index repair query: {}", table, e))?;
+        let rows = stmt
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Read {} index repair rows: {}", table, e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Collect {} index repair SQL: {}", table, e))?;
+        rows
+    };
+
+    let repaired_sql = repaired_create_table_sql(table_sql, table, &repair_table)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|e| format!("Disable foreign keys for {} repair: {}", table, e))?;
+    conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{}\";", repair_table))
+        .map_err(|e| format!("Drop stale {} repair table: {}", table, e))?;
+    conn.execute_batch(&repaired_sql)
+        .map_err(|e| format!("Create {} repair table: {}", table, e))?;
+    conn.execute_batch(&format!(
+        "INSERT INTO \"{}\" SELECT * FROM \"{}\";",
+        repair_table, table
+    ))
+    .map_err(|e| format!("Copy {} rows during repair: {}", table, e))?;
+    conn.execute_batch(&format!("DROP TABLE \"{}\";", table))
+        .map_err(|e| format!("Drop polluted {} table: {}", table, e))?;
+    conn.execute_batch(&format!(
+        "ALTER TABLE \"{}\" RENAME TO \"{}\";",
+        repair_table, table
+    ))
+    .map_err(|e| format!("Rename repaired {} table: {}", table, e))?;
+    for sql in index_sql {
+        conn.execute_batch(&sql)
+            .map_err(|e| format!("Recreate {} index during repair: {}", table, e))?;
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("Enable foreign keys after {} repair: {}", table, e))?;
+    Ok(())
+}
+
+fn repaired_create_table_sql(
+    table_sql: &str,
+    table: &str,
+    repair_table: &str,
+) -> Result<String, String> {
+    let corrected_refs = table_sql
+        .replace(
+            "\"chapter_versions_old_type_migration\"",
+            "chapter_versions",
+        )
+        .replace("[chapter_versions_old_type_migration]", "chapter_versions")
+        .replace("`chapter_versions_old_type_migration`", "chapter_versions")
+        .replace("chapter_versions_old_type_migration", "chapter_versions");
+
+    let replacements = [
+        (
+            format!("CREATE TABLE IF NOT EXISTS \"{}\"", table),
+            format!("CREATE TABLE \"{}\"", repair_table),
+        ),
+        (
+            format!("CREATE TABLE IF NOT EXISTS {}", table),
+            format!("CREATE TABLE \"{}\"", repair_table),
+        ),
+        (
+            format!("CREATE TABLE \"{}\"", table),
+            format!("CREATE TABLE \"{}\"", repair_table),
+        ),
+        (
+            format!("CREATE TABLE {}", table),
+            format!("CREATE TABLE \"{}\"", repair_table),
+        ),
+    ];
+
+    for (from, to) in replacements {
+        if corrected_refs.contains(&from) {
+            return Ok(corrected_refs.replacen(&from, &to, 1));
+        }
+    }
+
+    Err(format!(
+        "Cannot rewrite CREATE TABLE statement for {} during chapter_versions repair",
+        table
+    ))
 }

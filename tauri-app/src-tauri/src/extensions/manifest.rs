@@ -34,8 +34,10 @@ const ALLOWED_PACKAGE_KINDS: &[&str] = &[
     "prompt_pack",
     "context_rule_pack",
     "review_rubric",
+    "review_rubric_pack",
     "recipe_pack",
     "export_target",
+    "export_template",
 ];
 
 fn validate_ident(value: &str, field: &str) -> Result<(), String> {

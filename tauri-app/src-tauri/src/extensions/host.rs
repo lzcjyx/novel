@@ -8,6 +8,13 @@ use crate::extensions::manifest::{validate_extension_manifest, ExtensionManifest
 pub struct ExtensionContribution {
     pub hook: String,
     pub required_permission: Option<String>,
+    #[serde(default)]
+    pub package_kind: Option<String>,
+    #[serde(default)]
+    pub contribution_id: Option<String>,
+    #[serde(default)]
+    pub payload: Value,
+    #[serde(default)]
     pub metadata_patch: Value,
 }
 
@@ -98,11 +105,17 @@ pub fn execute_extension_hook(
                 }
             }
             merge_metadata_patch(&mut workflow_metadata, &contribution.metadata_patch);
+            append_extension_contribution(
+                &mut workflow_metadata,
+                &package.manifest.id,
+                &package.manifest.package_kinds,
+                contribution,
+            )?;
             hook_trace.push(ExtensionHookTrace {
                 extension_id: package.manifest.id.clone(),
                 hook: request.hook.clone(),
                 status: "applied".to_string(),
-                detail: contribution.required_permission.clone(),
+                detail: contribution_trace_detail(contribution),
             });
         }
     }
@@ -111,6 +124,23 @@ pub fn execute_extension_hook(
         workflow_metadata,
         hook_trace,
     })
+}
+
+pub fn extension_contribution_payloads(
+    workflow_metadata: &Value,
+    package_kind: &str,
+) -> Vec<Value> {
+    workflow_metadata
+        .get("extension_contributions")
+        .and_then(|value| value.get(package_kind))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("payload").cloned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 pub fn import_extension_package(
@@ -239,6 +269,69 @@ fn merge_metadata_patch(target: &mut Value, patch: &Value) {
             target_object.insert(key.clone(), value.clone());
         }
     }
+}
+
+fn append_extension_contribution(
+    workflow_metadata: &mut Value,
+    extension_id: &str,
+    declared_package_kinds: &[String],
+    contribution: &ExtensionContribution,
+) -> Result<(), String> {
+    let Some(package_kind) = contribution.package_kind.as_deref() else {
+        return Ok(());
+    };
+    if !declared_package_kinds
+        .iter()
+        .any(|declared| declared == package_kind)
+    {
+        return Err(format!(
+            "Extension '{}' does not declare package kind '{}'",
+            extension_id, package_kind
+        ));
+    }
+
+    ensure_object(workflow_metadata);
+    if !workflow_metadata
+        .get("extension_contributions")
+        .is_some_and(Value::is_object)
+    {
+        workflow_metadata["extension_contributions"] = serde_json::json!({});
+    }
+    let contributions = workflow_metadata["extension_contributions"]
+        .as_object_mut()
+        .ok_or_else(|| "extension_contributions must be an object".to_string())?;
+    let entry = contributions
+        .entry(package_kind.to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    if !entry.is_array() {
+        return Err(format!(
+            "extension_contributions.{} must be an array",
+            package_kind
+        ));
+    }
+    entry
+        .as_array_mut()
+        .ok_or_else(|| format!("extension_contributions.{} must be an array", package_kind))?
+        .push(serde_json::json!({
+            "extension_id": extension_id,
+            "contribution_id": contribution.contribution_id.clone(),
+            "hook": contribution.hook.clone(),
+            "payload": contribution.payload.clone(),
+        }));
+    Ok(())
+}
+
+fn contribution_trace_detail(contribution: &ExtensionContribution) -> Option<String> {
+    contribution.package_kind.as_ref().map_or_else(
+        || contribution.required_permission.clone(),
+        |kind| {
+            let id = contribution
+                .contribution_id
+                .as_deref()
+                .unwrap_or("anonymous");
+            Some(format!("{}:{}", kind, id))
+        },
+    )
 }
 
 fn record_extension_hook_trace(

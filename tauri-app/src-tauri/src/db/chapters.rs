@@ -213,6 +213,20 @@ pub fn update_chapter_version_metadata(
     Ok(())
 }
 
+pub fn update_chapter_version_type(
+    db: &Database,
+    version_id: &str,
+    version_type: &str,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    conn.execute(
+        "UPDATE chapter_versions SET version_type = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![version_type, version_id],
+    )
+    .map_err(|e| format!("Update chapter version type: {}", e))?;
+    Ok(())
+}
+
 pub fn update_chapter_after_revision(
     db: &Database,
     chapter_id: &str,

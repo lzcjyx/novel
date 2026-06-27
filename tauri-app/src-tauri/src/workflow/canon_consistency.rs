@@ -81,6 +81,10 @@ pub fn detect_review_precheck_issues_from_json(
         current_chapter_sequence,
     ));
     issues.extend(detect_style_drift_issues(chapter_text, &style_guides));
+    issues.extend(detect_style_asset_issues(
+        chapter_text,
+        writing_context_json,
+    ));
     issues
 }
 
@@ -322,6 +326,54 @@ fn detect_style_drift_issues(
             );
         }
     }
+    issues
+}
+
+fn detect_style_asset_issues(
+    chapter_text: &str,
+    writing_context_json: &str,
+) -> Vec<CanonConsistencyIssue> {
+    let Ok(context) = serde_json::from_str::<Value>(writing_context_json) else {
+        return Vec::new();
+    };
+    let Some(style_assets) = context
+        .get("style")
+        .and_then(|style| style.get("style_assets"))
+    else {
+        return Vec::new();
+    };
+    let forbidden_phrases = style_assets
+        .get("anti_ai_rules")
+        .map(crate::workflow::style_assets::forbidden_phrases_from_payload)
+        .unwrap_or_default();
+    let required_phrases = style_assets
+        .get("anti_ai_rules")
+        .map(crate::workflow::style_assets::required_phrases_from_payload)
+        .unwrap_or_default();
+
+    let mut issues = forbidden_phrases
+        .into_iter()
+        .filter(|phrase| contains_text(chapter_text, phrase))
+        .map(|phrase| CanonConsistencyIssue {
+            rule_type: "style_asset_forbidden_phrase".to_string(),
+            severity: "blocking".to_string(),
+            message: format!("Style asset forbids phrase: {phrase}"),
+            evidence: phrase,
+        })
+        .collect::<Vec<_>>();
+
+    issues.extend(
+        required_phrases
+            .into_iter()
+            .filter(|phrase| !contains_text(chapter_text, phrase))
+            .map(|phrase| CanonConsistencyIssue {
+                rule_type: "style_asset_required_phrase_missing".to_string(),
+                severity: "blocking".to_string(),
+                message: format!("Style asset requires missing phrase: {phrase}"),
+                evidence: phrase,
+            }),
+    );
+
     issues
 }
 

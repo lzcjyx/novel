@@ -3,6 +3,7 @@ use tauri_app_lib::db::context_rules::{
     list_context_rules, list_enabled_context_rules, upsert_context_rule, ContextRuleInput,
 };
 use tauri_app_lib::workflow::context_activation::activate_context_rules;
+use tauri_app_lib::workflow::writing_context::OperatorControls;
 
 fn setup_db() -> Database {
     let dir = tempfile::tempdir().unwrap();
@@ -452,4 +453,108 @@ fn context_activation_suppresses_keyword_hit_during_cooldown() {
 
     assert_eq!(ids, vec!["rule-normal"]);
     assert_eq!(trace.activated_rules[0].activation_reason, "keyword");
+}
+
+#[test]
+fn context_activation_fires_from_entity_refs_without_keywords() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapter_plans
+             (id, project_id, sequence, title, outline, pov_character_id, required_characters, required_locations, plot_goals, status)
+             VALUES
+             ('plan-entity-ref', ?1, 1, '旧站低语', '没有关键词。', 'lin-bai', '林白', '旧车站', '调查', 'planned')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+    upsert_context_rule(
+        &db,
+        ContextRuleInput {
+            id: Some("rule-entity-ref".to_string()),
+            project_id: project_id.clone(),
+            name: "林白实体规则".to_string(),
+            primary_keywords: vec!["不会出现的关键词".to_string()],
+            secondary_keywords: vec![],
+            entity_refs: vec!["character:lin-bai".to_string()],
+            chapter_ranges: vec![],
+            priority: 30,
+            token_budget: 80,
+            sticky_chapters: 0,
+            cooldown_chapters: 0,
+            content: "林白在旧站不能直接说出真相。".to_string(),
+            source_type: "manual".to_string(),
+            source_id: Some("entity-rule".to_string()),
+            enabled: true,
+            metadata: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+
+    let plan = tauri_app_lib::db::chapters::get_next_chapter_plan(&db, &project_id)
+        .unwrap()
+        .unwrap();
+    let trace = activate_context_rules(&db, &project_id, &plan, None).unwrap();
+
+    assert_eq!(trace.activated_rules.len(), 1);
+    assert_eq!(trace.activated_rules[0].rule_id, "rule-entity-ref");
+    assert_eq!(trace.activated_rules[0].activation_reason, "entity_ref");
+}
+
+#[test]
+fn operator_controls_can_pin_and_unpin_source_keys() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO chapter_plans
+             (id, project_id, sequence, title, outline, status)
+             VALUES ('plan-pins', ?1, 1, '红伞', '红伞线索。', 'planned')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
+    }
+    upsert_context_rule(
+        &db,
+        ContextRuleInput {
+            id: Some("rule-pin-target".to_string()),
+            project_id: project_id.clone(),
+            name: "红伞规则".to_string(),
+            primary_keywords: vec!["红伞".to_string()],
+            secondary_keywords: vec![],
+            entity_refs: vec![],
+            chapter_ranges: vec![],
+            priority: 30,
+            token_budget: 80,
+            sticky_chapters: 0,
+            cooldown_chapters: 0,
+            content: "红伞规则。".to_string(),
+            source_type: "manual".to_string(),
+            source_id: Some("red-umbrella".to_string()),
+            enabled: true,
+            metadata: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+    let controls = OperatorControls {
+        pinned_source_keys: vec!["hard_fact:fact-pinned".to_string()],
+        unpinned_source_keys: vec!["manual:red-umbrella".to_string()],
+        ..Default::default()
+    };
+    let plan = tauri_app_lib::db::chapters::get_next_chapter_plan(&db, &project_id)
+        .unwrap()
+        .unwrap();
+    let trace = activate_context_rules(&db, &project_id, &plan, Some(&controls)).unwrap();
+
+    assert!(trace.activated_rules.is_empty());
+    assert!(trace
+        .source_keys
+        .contains(&"hard_fact:fact-pinned".to_string()));
+    assert!(!trace
+        .source_keys
+        .contains(&"manual:red-umbrella".to_string()));
+    assert_eq!(trace.source_trace[0].reason, "manual_pin");
 }

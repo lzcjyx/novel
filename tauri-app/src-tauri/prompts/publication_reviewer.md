@@ -25,6 +25,9 @@
 chapter:
 {{CHAPTER_JSON}}
 
+extension_review_rubrics:
+{{EXTENSION_REVIEW_RUBRICS_JSON}}
+
 blog_config:
 {{BLOG_CONFIG_JSON}}
 

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::connection::Database;
 use crate::models::ChapterPlan;
@@ -9,6 +9,8 @@ use crate::workflow::writing_context::OperatorControls;
 pub struct ContextActivationTrace {
     pub activated_rules: Vec<ContextRuleActivation>,
     pub source_keys: Vec<String>,
+    #[serde(default)]
+    pub source_trace: Vec<ContextSourceTrace>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +24,15 @@ pub struct ContextRuleActivation {
     pub matched_keywords: Vec<String>,
     pub matched_secondary_keywords: Vec<String>,
     pub activation_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSourceTrace {
+    pub source_key: String,
+    pub source_type: String,
+    pub source_id: String,
+    pub reason: String,
+    pub label: String,
 }
 
 fn push_target(targets: &mut Vec<String>, value: Option<&str>) {
@@ -49,6 +60,64 @@ fn activation_targets(plan: &ChapterPlan, controls: Option<&OperatorControls>) -
         push_target(&mut targets, controls.style_emphasis.as_deref());
     }
     targets.join("\n").to_lowercase()
+}
+
+fn activation_entity_targets(plan: &ChapterPlan) -> HashSet<String> {
+    let mut targets = HashSet::new();
+    if let Some(pov) = plan.pov_character_id.as_deref() {
+        push_entity_target(&mut targets, "character", pov);
+    }
+    push_json_or_text_entities(&mut targets, "character", &plan.required_characters);
+    push_json_or_text_entities(&mut targets, "location", &plan.required_locations);
+    push_json_or_text_entities(&mut targets, "plot_thread", &plan.plot_goals);
+    push_json_or_text_entities(&mut targets, "foreshadowing", &plan.required_foreshadowing);
+    targets
+}
+
+fn push_json_or_text_entities(targets: &mut HashSet<String>, entity_type: &str, raw: &str) {
+    if let Ok(values) = serde_json::from_str::<Vec<String>>(raw) {
+        for value in values {
+            push_entity_target(targets, entity_type, &value);
+        }
+    } else {
+        push_entity_target(targets, entity_type, raw);
+    }
+}
+
+fn push_entity_target(targets: &mut HashSet<String>, entity_type: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+    targets.insert(format!("{}:{}", entity_type, normalize_entity_ref(value)));
+    targets.insert(value.to_lowercase());
+}
+
+fn normalize_entity_ref(value: &str) -> String {
+    value
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii() {
+                ch
+            } else if ch.is_whitespace() {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn matched_entity_refs(targets: &HashSet<String>, refs: &[String]) -> Vec<String> {
+    refs.iter()
+        .filter(|entity_ref| {
+            let normalized = normalize_entity_ref(entity_ref);
+            targets.contains(&normalized) || targets.contains(&entity_ref.to_lowercase())
+        })
+        .cloned()
+        .collect()
 }
 
 fn matched_keywords(haystack: &str, keywords: &[String]) -> Vec<String> {
@@ -189,6 +258,16 @@ pub fn activate_context_rules(
     controls: Option<&OperatorControls>,
 ) -> Result<ContextActivationTrace, String> {
     let target_text = activation_targets(plan, controls);
+    let entity_targets = activation_entity_targets(plan);
+    let unpinned = controls
+        .map(|controls| {
+            controls
+                .unpinned_source_keys
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
     let rules = crate::db::context_rules::list_enabled_context_rules(db, project_id)?;
     let recent_activations = load_last_rule_activation_sequences(db, project_id, plan.sequence)?;
     let mut activated_rules = Vec::new();
@@ -201,6 +280,8 @@ pub fn activate_context_rules(
         let matched_secondary = matched_keywords(&target_text, &rule.secondary_keywords);
         let keyword_match = !matched_primary.is_empty()
             && (rule.secondary_keywords.is_empty() || !matched_secondary.is_empty());
+        let matched_entities = matched_entity_refs(&entity_targets, &rule.entity_refs);
+        let entity_ref_match = !matched_entities.is_empty();
         let sticky_match = within_recent_window(
             &recent_activations,
             &rule.id,
@@ -217,6 +298,8 @@ pub fn activate_context_rules(
                 continue;
             }
             "keyword"
+        } else if entity_ref_match {
+            "entity_ref"
         } else if sticky_match {
             "sticky"
         } else {
@@ -225,19 +308,26 @@ pub fn activate_context_rules(
         let content = clip_to_token_budget(&rule.content, rule.token_budget);
         let token_estimate = crate::db::generation_jobs::estimate_tokens(&content);
         let source_id = rule.source_id.clone().unwrap_or_else(|| rule.id.clone());
+        let source_key = format!("{}:{}", rule.source_type, source_id);
+        if unpinned.contains(&source_key) {
+            continue;
+        }
         activated_rules.push(ContextRuleActivation {
             rule_id: rule.id,
             name: rule.name,
-            source_key: format!("{}:{}", rule.source_type, source_id),
+            source_key,
             priority: rule.priority,
             token_estimate,
             content,
-            matched_keywords: if activation_reason == "sticky" {
+            matched_keywords: if activation_reason == "sticky" || activation_reason == "entity_ref"
+            {
                 Vec::new()
             } else {
                 matched_primary
             },
-            matched_secondary_keywords: if activation_reason == "sticky" {
+            matched_secondary_keywords: if activation_reason == "sticky"
+                || activation_reason == "entity_ref"
+            {
                 Vec::new()
             } else {
                 matched_secondary
@@ -252,13 +342,155 @@ pub fn activate_context_rules(
             .then(a.name.cmp(&b.name))
             .then(a.rule_id.cmp(&b.rule_id))
     });
-    let source_keys = activated_rules
+    let mut source_keys = activated_rules
         .iter()
         .map(|activation| activation.source_key.clone())
-        .collect();
+        .collect::<Vec<_>>();
+    let mut source_trace = Vec::new();
+    if let Some(controls) = controls {
+        for source_key in &controls.pinned_source_keys {
+            let source_key = source_key.trim();
+            if source_key.is_empty() || source_keys.iter().any(|existing| existing == source_key) {
+                continue;
+            }
+            source_keys.push(source_key.to_string());
+            let (source_type, source_id) = source_key
+                .split_once(':')
+                .map(|(source_type, source_id)| (source_type.to_string(), source_id.to_string()))
+                .unwrap_or_else(|| ("manual".to_string(), source_key.to_string()));
+            source_trace.push(ContextSourceTrace {
+                source_key: source_key.to_string(),
+                source_type,
+                source_id,
+                reason: "manual_pin".to_string(),
+                label: source_key.to_string(),
+            });
+        }
+    }
 
     Ok(ContextActivationTrace {
         activated_rules,
         source_keys,
+        source_trace,
     })
+}
+
+pub fn append_extension_context_rules(
+    trace: &mut ContextActivationTrace,
+    workflow_metadata: &serde_json::Value,
+    plan: &ChapterPlan,
+    controls: Option<&OperatorControls>,
+) -> Result<(), String> {
+    let target_text = activation_targets(plan, controls);
+    let payloads = crate::extensions::host::extension_contribution_payloads(
+        workflow_metadata,
+        "context_rule_pack",
+    );
+    for (index, payload) in payloads.into_iter().enumerate() {
+        let extension_id = extension_contribution_field(
+            workflow_metadata,
+            "context_rule_pack",
+            index,
+            "extension_id",
+        )
+        .unwrap_or_else(|| "extension".to_string());
+        let contribution_id = extension_contribution_field(
+            workflow_metadata,
+            "context_rule_pack",
+            index,
+            "contribution_id",
+        )
+        .unwrap_or_else(|| format!("context-rule-{}", index + 1));
+        let primary_keywords = payload
+            .get("primary_keywords")
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let matched_primary = if primary_keywords.is_empty() {
+            Vec::new()
+        } else {
+            matched_keywords(&target_text, &primary_keywords)
+        };
+        if !primary_keywords.is_empty() && matched_primary.is_empty() {
+            continue;
+        }
+        let content = payload
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if content.is_empty() {
+            continue;
+        }
+        let token_budget = payload
+            .get("token_budget")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(256) as i32;
+        let content = clip_to_token_budget(content, token_budget);
+        let source_key = format!(
+            "extension_context_rule:{}:{}",
+            extension_id, contribution_id
+        );
+        trace.activated_rules.push(ContextRuleActivation {
+            rule_id: format!("extension:{}:{}", extension_id, contribution_id),
+            name: payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&contribution_id)
+                .to_string(),
+            source_key: source_key.clone(),
+            priority: payload
+                .get("priority")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(50) as i32,
+            token_estimate: crate::db::generation_jobs::estimate_tokens(&content),
+            content,
+            matched_keywords: matched_primary,
+            matched_secondary_keywords: Vec::new(),
+            activation_reason: "extension_context_rule_pack".to_string(),
+        });
+        if !trace.source_keys.contains(&source_key) {
+            trace.source_keys.push(source_key.clone());
+        }
+        trace.source_trace.push(ContextSourceTrace {
+            source_key,
+            source_type: "extension_context_rule".to_string(),
+            source_id: format!("{}:{}", extension_id, contribution_id),
+            reason: "extension_context_rule_pack".to_string(),
+            label: payload
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(&contribution_id)
+                .to_string(),
+        });
+    }
+    trace.activated_rules.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then(a.name.cmp(&b.name))
+            .then(a.rule_id.cmp(&b.rule_id))
+    });
+    Ok(())
+}
+
+fn extension_contribution_field(
+    workflow_metadata: &serde_json::Value,
+    package_kind: &str,
+    index: usize,
+    field: &str,
+) -> Option<String> {
+    workflow_metadata
+        .get("extension_contributions")
+        .and_then(|value| value.get(package_kind))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.get(index))
+        .and_then(|item| item.get(field))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }

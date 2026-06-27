@@ -378,6 +378,7 @@ async fn review_pipeline_includes_deterministic_canon_precheck() {
         canon_rules_json: serde_json::to_string(&bible.canon_rules).unwrap(),
         timeline_json: "[]".to_string(),
         style_guide_json: "[]".to_string(),
+        extension_review_rubrics_json: "[]".to_string(),
         blog_config_json: "{}".to_string(),
         project_policy_json: "{}".to_string(),
     };
@@ -472,6 +473,7 @@ async fn review_pipeline_flags_repeated_previous_ending_hook() {
         canon_rules_json: "[]".to_string(),
         timeline_json: "[]".to_string(),
         style_guide_json: "[]".to_string(),
+        extension_review_rubrics_json: "[]".to_string(),
         blog_config_json: "{}".to_string(),
         project_policy_json: "{}".to_string(),
     };
@@ -571,6 +573,7 @@ async fn review_pipeline_flags_timeline_and_location_continuity() {
         canon_rules_json: "[]".to_string(),
         timeline_json: serde_json::to_string(&timeline).unwrap(),
         style_guide_json: "[]".to_string(),
+        extension_review_rubrics_json: "[]".to_string(),
         blog_config_json: "{}".to_string(),
         project_policy_json: "{}".to_string(),
     };
@@ -667,6 +670,7 @@ async fn review_pipeline_flags_explicit_style_drift() {
         canon_rules_json: "[]".to_string(),
         timeline_json: "[]".to_string(),
         style_guide_json: serde_json::to_string(&style_guides).unwrap(),
+        extension_review_rubrics_json: "[]".to_string(),
         blog_config_json: "{}".to_string(),
         project_policy_json: "{}".to_string(),
     };

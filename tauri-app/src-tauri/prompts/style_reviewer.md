@@ -29,6 +29,12 @@ pass 判定：
 style_guide:
 {{STYLE_GUIDE_JSON}}
 
+writing_context_with_style_assets:
+{{WRITING_BRIEF_JSON}}
+
+extension_review_rubrics:
+{{EXTENSION_REVIEW_RUBRICS_JSON}}
+
 chapter:
 {{CHAPTER_JSON}}
 

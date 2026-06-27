@@ -276,6 +276,64 @@ pub fn mark_learning_entries_used(db: &Database, ids: &[String]) -> Result<(), S
     Ok(())
 }
 
+pub fn save_learning_entries_with_style_drafts(
+    db: &Database,
+    project_id: &str,
+    entries: &[LearningEntry],
+) -> Result<Vec<String>, String> {
+    let mut saved_ids = Vec::new();
+    let mut style_entry_ids = Vec::new();
+    {
+        let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+        for entry in entries {
+            let id = if entry.id.trim().is_empty() {
+                Database::new_uuid()
+            } else {
+                entry.id.clone()
+            };
+            let metadata = if entry.metadata.trim().is_empty() {
+                "{}"
+            } else {
+                entry.metadata.as_str()
+            };
+            conn.execute(
+                "INSERT OR IGNORE INTO learning_entries
+                 (id, project_id, source_type, source_url, source_title, category,
+                  pattern_name, pattern_description, example_text, application_notes,
+                  confidence, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    id,
+                    project_id,
+                    entry.source_type,
+                    entry.source_url.as_deref(),
+                    entry.source_title.as_deref(),
+                    entry.category,
+                    entry.pattern_name,
+                    entry.pattern_description,
+                    entry.example_text.as_deref(),
+                    entry.application_notes.as_deref(),
+                    entry.confidence,
+                    metadata,
+                ],
+            )
+            .map_err(|e| format!("Insert learning: {}", e))?;
+            if is_style_learning_category(&entry.category) {
+                style_entry_ids.push(id.clone());
+            }
+            saved_ids.push(id);
+        }
+    }
+
+    for entry_id in &style_entry_ids {
+        crate::workflow::style_assets::create_draft_style_asset_from_learning_entry(
+            db, project_id, entry_id,
+        )?;
+    }
+
+    Ok(saved_ids)
+}
+
 pub fn save_reflection_entries(
     db: &Database,
     project_id: &str,
@@ -305,4 +363,11 @@ pub fn save_reflection_entries(
         .map_err(|e| format!("Save reflection entry: {}", e))?;
     }
     Ok(())
+}
+
+fn is_style_learning_category(category: &str) -> bool {
+    matches!(
+        category.trim().to_lowercase().as_str(),
+        "style" | "style_pattern" | "prose" | "language"
+    )
 }

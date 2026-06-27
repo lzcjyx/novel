@@ -330,6 +330,13 @@ fn interrupted_generation_recovery_rolls_back_task_owned_rows() {
             rusqlite::params![project_id],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO hard_facts
+                (id, project_id, chapter_id, chapter_version_id, fact_type, subject, predicate, object, value_text, certainty, scope, status)
+             VALUES ('fact-owned', ?1, 'chapter-owned', 'version-owned', 'amount', '票据', 'records_amount', '三百枚灵石', '票据金额为三百枚灵石', 0.9, 'project', 'active')",
+            rusqlite::params![project_id],
+        )
+        .unwrap();
     }
 
     tauri_app_lib::workflow::task_transaction::record_task_owned_row(
@@ -344,6 +351,13 @@ fn interrupted_generation_recovery_rolls_back_task_owned_rows() {
         &job_id,
         "chapter_versions",
         "version-owned",
+    )
+    .unwrap();
+    tauri_app_lib::workflow::task_transaction::record_task_owned_row(
+        &db,
+        &job_id,
+        "hard_facts",
+        "fact-owned",
     )
     .unwrap();
     tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
@@ -371,6 +385,13 @@ fn interrupted_generation_recovery_rolls_back_task_owned_rows() {
             |row| row.get(0),
         )
         .unwrap();
+    let hard_fact_count: i32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM hard_facts WHERE id = 'fact-owned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let plan_status: String = conn
         .query_row(
             "SELECT status FROM chapter_plans WHERE id = 'plan-rollback'",
@@ -387,9 +408,99 @@ fn interrupted_generation_recovery_rolls_back_task_owned_rows() {
         .unwrap();
 
     assert_eq!(chapter_count, 0);
+    assert_eq!(hard_fact_count, 0);
     assert_eq!(version_count, 0);
     assert_eq!(plan_status, "planned");
     assert_eq!(job_status, "failed");
+}
+
+#[test]
+fn interrupted_generation_recovery_records_recovery_summary() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    insert_plan(&db, &project_id, "plan-recovery-summary");
+    let job_id = tauri_app_lib::db::generation_jobs::create_generation_job(
+        &db,
+        &project_id,
+        "plan-recovery-summary",
+    )
+    .unwrap();
+    tauri_app_lib::workflow::task_transaction::begin_generation_task_snapshot(
+        &db,
+        &job_id,
+        &project_id,
+        "plan-recovery-summary",
+    )
+    .unwrap();
+    tauri_app_lib::db::generation_jobs::record_job_phase_event(
+        &db,
+        &job_id,
+        "generate_draft",
+        "running",
+        Some("model call started"),
+        40.0,
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        let metadata_raw: String = conn
+            .query_row(
+                "SELECT metadata FROM generation_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut metadata: Value = serde_json::from_str(&metadata_raw).unwrap();
+        metadata["prompt_hash"] = json!("prompt-hash-1");
+        metadata["context_hash"] = json!("context-hash-1");
+        metadata["run_artifacts"] = json!({"artifact_id": "artifact-1"});
+        conn.execute(
+            "UPDATE generation_jobs SET metadata = ?1, updated_at = datetime('now', '-2 hours') WHERE id = ?2",
+            rusqlite::params![metadata.to_string(), job_id],
+        )
+        .unwrap();
+    }
+    tauri_app_lib::db::generation_jobs::update_job_status(&db, &job_id, "reviewing", None).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE generation_jobs SET updated_at = datetime('now', '-2 hours') WHERE id = ?1",
+            rusqlite::params![job_id],
+        )
+        .unwrap();
+    }
+
+    let recovered = tauri_app_lib::db::generation_jobs::recover_interrupted_generation_jobs(
+        &db,
+        0,
+        "Application quit before this generation job completed.",
+    )
+    .unwrap();
+
+    assert_eq!(recovered, 1);
+    let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
+    let metadata: Value = serde_json::from_str(&jobs[0].metadata).unwrap();
+    assert_eq!(
+        metadata["recovery_summary"]["latest_phase"],
+        "generate_draft"
+    );
+    assert_eq!(metadata["recovery_summary"]["prompt_hash"], "prompt-hash-1");
+    assert_eq!(
+        metadata["recovery_summary"]["context_hash"],
+        "context-hash-1"
+    );
+    assert_eq!(
+        metadata["recovery_summary"]["latest_artifact_ids"][0],
+        "artifact-1"
+    );
+    assert!(metadata["recovery_summary"]["operator_recovery_options"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("retry")));
+    assert!(metadata["recovery_summary"]["operator_recovery_options"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("audit")));
 }
 
 #[test]

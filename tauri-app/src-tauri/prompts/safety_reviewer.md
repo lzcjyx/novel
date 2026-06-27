@@ -17,6 +17,9 @@
 chapter:
 {{CHAPTER_JSON}}
 
+extension_review_rubrics:
+{{EXTENSION_REVIEW_RUBRICS_JSON}}
+
 project_policy:
 {{PROJECT_POLICY_JSON}}
 

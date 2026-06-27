@@ -2024,14 +2024,13 @@ body {
 .graph-node {
   position: absolute;
   transform: translate(-50%, -50%);
-  width: 58px;
-  min-width: 52px;
-  min-height: 42px;
-  padding: 5px 6px;
-  display: inline-flex;
+  width: 112px;
+  height: 54px;
+  padding: 6px 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
+  gap: 6px;
   border: 1px solid var(--control-stroke-strong);
   border-radius: var(--radius-control);
   background: var(--control-fill);
@@ -2064,13 +2063,27 @@ body {
   box-shadow: 0 0 0 3px rgba(0, 103, 192, 0.22), 0 8px 20px rgba(0,0,0,0.18);
   z-index: 3;
 }
-.graph-node-initial {
-  min-width: 20px;
+.graph-node-type {
+  min-width: 28px;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent-pressed);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.1;
+  text-align: center;
+}
+.graph-node-label {
+  min-width: 0;
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  text-align: center;
+  font-weight: 600;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 .graph-node-degree {
   min-width: 18px;

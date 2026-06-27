@@ -308,3 +308,83 @@ fn prompt_presets_are_listed_by_scope_and_name() {
     assert_eq!(ids, vec!["preset-a", "preset-z"]);
     assert_eq!(presets[0].scope, "draft");
 }
+
+#[test]
+fn prompt_workbench_snapshots_clone_and_dry_runs_with_overrides_and_few_shots() {
+    let db = setup_db("prompt-workbench-deepening.db");
+    let preset_id = tauri_app_lib::db::prompt_presets::upsert_prompt_preset(
+        &db,
+        &tauri_app_lib::db::prompt_presets::PromptPresetInput {
+            id: Some("builtin-draft".to_string()),
+            name: "Built-in Draft".to_string(),
+            description: Some("Built-in fixture".to_string()),
+            scope: "draft".to_string(),
+            is_builtin: true,
+            metadata: serde_json::json!({"source": "built_in"}),
+        },
+    )
+    .unwrap();
+    tauri_app_lib::db::prompt_presets::upsert_prompt_unit(
+        &db,
+        &tauri_app_lib::db::prompt_presets::PromptUnitInput {
+            preset_id: preset_id.clone(),
+            identifier: "draft.system".to_string(),
+            role: "system".to_string(),
+            order: 10,
+            enabled: true,
+            injection_position: "system".to_string(),
+            generation_phase: "draft".to_string(),
+            content: "Genre={{GENRE}}. Voice={{VOICE}}.".to_string(),
+            metadata: serde_json::json!({
+                "parameters": {
+                    "GENRE": {"default": "mystery"},
+                    "VOICE": {"default": "restrained"}
+                },
+                "few_shot_examples": [
+                    {"label": "good", "input": "雨夜", "output": "他把伞沿压低。"},
+                    {"label": "bad", "input": "情绪", "output": "他的眼中闪过复杂情绪。"}
+                ]
+            }),
+        },
+    )
+    .unwrap();
+
+    let snapshot = tauri_app_lib::db::prompt_presets::create_prompt_preset_snapshot(
+        &db,
+        &preset_id,
+        Some("before clone"),
+    )
+    .unwrap();
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(snapshot.preset_id, preset_id);
+    assert!(snapshot.prompt_hash.len() >= 16);
+
+    let cloned_id = tauri_app_lib::db::prompt_presets::clone_prompt_preset(
+        &db,
+        &preset_id,
+        Some("custom-draft".to_string()),
+        "Custom Draft",
+    )
+    .unwrap();
+    let cloned_package =
+        tauri_app_lib::db::prompt_presets::export_prompt_preset_package(&db, &cloned_id).unwrap();
+    assert_eq!(cloned_package.id, "custom-draft");
+    assert!(!cloned_package.is_builtin);
+    assert_eq!(
+        cloned_package.metadata["cloned_from"].as_str(),
+        Some("builtin-draft")
+    );
+
+    let dry_run = tauri_app_lib::db::prompt_presets::dry_run_prompt_preset(
+        &db,
+        &cloned_id,
+        "draft",
+        HashMap::from([("VOICE".to_string(), "cold and precise".to_string())]),
+    )
+    .unwrap();
+    assert!(dry_run.system_prompt.contains("Genre=mystery"));
+    assert!(dry_run.system_prompt.contains("Voice=cold and precise"));
+    assert!(dry_run.system_prompt.contains("Few-shot examples"));
+    assert!(dry_run.system_prompt.contains("他把伞沿压低。"));
+    assert_eq!(dry_run.unit_traces[0].identifier.as_str(), "draft.system");
+}
