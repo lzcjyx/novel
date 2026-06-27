@@ -714,11 +714,22 @@ async fn rebuild_vector_index(
         ));
     }
 
+    let settings = db::settings::get_settings(&state.db)?;
+    let embedding_config = embedding_provider_config(&state, &settings)
+        .map_err(|e| format!("Embedding provider is not configured: {}", e))?;
+    let expected_embedding_metadata = crate::db::vector_store::VectorEmbeddingMetadata {
+        provider: embedding_config.provider_type.clone(),
+        model: embedding_config.embedding_model.clone(),
+        kind: ai::client::EmbeddingInputKind::Document,
+        dim: settings.embedding_dim,
+    };
+
     let candidate_count = candidates.len();
-    let pending = crate::db::vector_store::filter_vector_index_candidates(
+    let pending = crate::db::vector_store::filter_vector_index_candidates_with_embedding_metadata(
         &state.db,
         &project_id,
         candidates,
+        &expected_embedding_metadata,
     )?;
     let skipped = candidate_count.saturating_sub(pending.len());
     if pending.is_empty() {
@@ -732,7 +743,8 @@ async fn rebuild_vector_index(
         ));
     }
 
-    let emb_provider = get_embedding_provider(&state)
+    let emb_provider = embedding_config
+        .build()
         .map_err(|e| format!("Embedding provider is not configured: {}", e))?;
     let embed = emb_provider.as_ref();
     let contents: Vec<String> = pending
@@ -740,13 +752,19 @@ async fn rebuild_vector_index(
         .map(|candidate| candidate.content.clone())
         .collect();
     let embeddings = embed
-        .embed(&contents)
+        .embed_with_kind(&contents, ai::client::EmbeddingInputKind::Document)
         .await
         .map_err(|e| format!("Embed: {}", e))?;
     let mut inserted = 0;
     for (i, candidate) in pending.iter().enumerate() {
         if i < embeddings.len() {
-            crate::db::vector_store::insert_vector_document(
+            let embedding_metadata = crate::db::vector_store::VectorEmbeddingMetadata::new(
+                &embedding_config.provider_type,
+                &embedding_config.embedding_model,
+                ai::client::EmbeddingInputKind::Document,
+                &embeddings[i],
+            );
+            crate::db::vector_store::insert_vector_document_with_embedding_metadata(
                 &state.db,
                 &project_id,
                 &candidate.source_type,
@@ -755,6 +773,7 @@ async fn rebuild_vector_index(
                 &candidate.content,
                 &candidate.metadata,
                 &embeddings[i],
+                &embedding_metadata,
             )
             .ok();
             inserted += 1;
@@ -1421,22 +1440,39 @@ async fn test_embedding_provider(
         timeout_secs: 600,
     };
     let start = std::time::Instant::now();
-    match client.embed(&["test embedding".to_string()]).await {
-        Ok(vecs) if !vecs.is_empty() => Ok(TestResult {
-            ok: true,
-            message: format!(
-                "OK — {} dimensions, {}ms",
-                vecs[0].len(),
-                start.elapsed().as_millis()
-            ),
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-        }),
-        Ok(_) => Ok(TestResult {
+    let document_result = client
+        .embed_with_kind(
+            &["test document embedding".to_string()],
+            ai::client::EmbeddingInputKind::Document,
+        )
+        .await;
+    let query_result = client
+        .embed_with_kind(
+            &["test query embedding".to_string()],
+            ai::client::EmbeddingInputKind::Query,
+        )
+        .await;
+    match (document_result, query_result) {
+        (Ok(document_vecs), Ok(query_vecs))
+            if !document_vecs.is_empty() && !query_vecs.is_empty() =>
+        {
+            Ok(TestResult {
+                ok: true,
+                message: format!(
+                    "OK — document {} dimensions, query {} dimensions, {}ms",
+                    document_vecs[0].len(),
+                    query_vecs[0].len(),
+                    start.elapsed().as_millis()
+                ),
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+            })
+        }
+        (Ok(_), Ok(_)) => Ok(TestResult {
             ok: false,
             message: "Empty response".into(),
             latency_ms: None,
         }),
-        Err(e) => Ok(TestResult {
+        (Err(e), _) | (_, Err(e)) => Ok(TestResult {
             ok: false,
             message: format!("Failed: {}", e),
             latency_ms: None,

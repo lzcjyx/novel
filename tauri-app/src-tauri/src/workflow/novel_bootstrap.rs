@@ -1,4 +1,4 @@
-use crate::ai::client::ModelClient;
+use crate::ai::client::{EmbeddingInputKind, ModelClient};
 use crate::db::connection::Database;
 use crate::db::{chapters, knowledge_graph, projects};
 use crate::models::*;
@@ -311,7 +311,10 @@ pub async fn embed_and_index_bible(
         .iter()
         .map(|candidate| candidate.content.clone())
         .collect();
-    match provider.embed(&text_contents).await {
+    match provider
+        .embed_with_kind(&text_contents, EmbeddingInputKind::Document)
+        .await
+    {
         Ok(embeddings) => {
             let mut inserted = 0;
             for (i, candidate) in pending.iter().enumerate() {

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
-use tauri_app_lib::ai::client::ModelClient;
+use tauri_app_lib::ai::client::{EmbeddingInputKind, ModelClient};
 use tauri_app_lib::db::connection::Database;
 use tauri_app_lib::models::ChapterPlan;
 use tauri_app_lib::workflow::writing_context::OperatorControls;
@@ -315,6 +315,78 @@ fn vector_index_candidates_skip_unchanged_content_hashes() {
 }
 
 #[test]
+fn vector_index_candidates_respect_embedding_freshness_metadata() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+    let content = "The same chapter text needs a fresh embedding when the model changes.";
+    let embedding = [1.0, 0.0];
+    let old_metadata = tauri_app_lib::db::vector_store::VectorEmbeddingMetadata::new(
+        "openai_compat",
+        "old-embedding",
+        EmbeddingInputKind::Document,
+        &embedding,
+    );
+    tauri_app_lib::db::vector_store::insert_vector_document_with_embedding_metadata(
+        &db,
+        &project_id,
+        "chapter",
+        Some("chapter-freshness"),
+        "Freshness fixture",
+        content,
+        "{}",
+        &embedding,
+        &old_metadata,
+    )
+    .unwrap();
+
+    let same_metadata = tauri_app_lib::db::vector_store::VectorEmbeddingMetadata {
+        provider: "openai_compat".to_string(),
+        model: "old-embedding".to_string(),
+        kind: EmbeddingInputKind::Document,
+        dim: 2,
+    };
+    let unchanged =
+        tauri_app_lib::db::vector_store::filter_vector_index_candidates_with_embedding_metadata(
+            &db,
+            &project_id,
+            vec![tauri_app_lib::db::vector_store::VectorIndexCandidate::new(
+                "chapter-freshness",
+                "chapter",
+                "Freshness fixture",
+                content,
+                "{}",
+            )],
+            &same_metadata,
+        )
+        .unwrap();
+    assert!(unchanged.is_empty());
+
+    let changed_metadata = tauri_app_lib::db::vector_store::VectorEmbeddingMetadata {
+        provider: "openai_compat".to_string(),
+        model: "new-embedding".to_string(),
+        kind: EmbeddingInputKind::Document,
+        dim: 2,
+    };
+    let pending =
+        tauri_app_lib::db::vector_store::filter_vector_index_candidates_with_embedding_metadata(
+            &db,
+            &project_id,
+            vec![tauri_app_lib::db::vector_store::VectorIndexCandidate::new(
+                "chapter-freshness",
+                "chapter",
+                "Freshness fixture",
+                content,
+                "{}",
+            )],
+            &changed_metadata,
+        )
+        .unwrap();
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source_id, "chapter-freshness");
+}
+
+#[test]
 fn bge_m3_embedding_inputs_are_prepared_asymmetricly() {
     let docs = vec!["旧车站的怀表线索".to_string()];
     let queries = vec!["本章需要找回怀表".to_string()];
@@ -343,6 +415,7 @@ fn bge_m3_embedding_inputs_are_prepared_asymmetricly() {
 #[derive(Default)]
 struct CountingEmbeddingProvider {
     batches: Mutex<Vec<Vec<String>>>,
+    kinds: Mutex<Vec<EmbeddingInputKind>>,
 }
 
 #[async_trait]
@@ -366,8 +439,17 @@ impl ModelClient for CountingEmbeddingProvider {
         Ok(String::new())
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Err("legacy embed should not be used for RAG indexing".into())
+    }
+
+    async fn embed_with_kind(
+        &self,
+        texts: &[String],
+        kind: EmbeddingInputKind,
+    ) -> Result<Vec<Vec<f32>>, String> {
         self.batches.lock().unwrap().push(texts.to_vec());
+        self.kinds.lock().unwrap().push(kind);
         Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
     }
 }
@@ -398,6 +480,10 @@ async fn bible_indexing_skips_embedding_for_unchanged_vector_hashes() {
     .await;
     assert_eq!(provider.batches.lock().unwrap().len(), 1);
     assert_eq!(provider.batches.lock().unwrap()[0].len(), 1);
+    assert_eq!(
+        *provider.kinds.lock().unwrap(),
+        vec![EmbeddingInputKind::Document]
+    );
 
     tauri_app_lib::workflow::novel_bootstrap::embed_and_index_bible(
         &db,
@@ -433,6 +519,10 @@ async fn bible_indexing_skips_embedding_for_unchanged_vector_hashes() {
     assert_eq!(batches[1].len(), 1);
     assert!(batches[1][0].contains("find the rooftop witness"));
     drop(batches);
+    assert_eq!(
+        *provider.kinds.lock().unwrap(),
+        vec![EmbeddingInputKind::Document, EmbeddingInputKind::Document]
+    );
 
     let (stored_count, stored_content): (i64, String) = {
         let conn = db.conn.lock().unwrap();

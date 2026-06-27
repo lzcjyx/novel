@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tauri_app_lib::ai::client::{ModelClient, ModelUsageReport};
+use tauri_app_lib::ai::client::{EmbeddingInputKind, ModelClient, ModelUsageReport};
 use tauri_app_lib::db::connection::Database;
 use tauri_app_lib::workflow::prompt_rendering::{
     find_unresolved_placeholders, render_prompt_strict,
@@ -403,6 +403,7 @@ struct CapturingProvider {
     users: Arc<Mutex<Vec<String>>>,
     embed_calls: Arc<Mutex<usize>>,
     canon_graph_edges: bool,
+    embed_kinds: Arc<Mutex<Vec<EmbeddingInputKind>>>,
     canon_task_rows: bool,
     review_text: Option<String>,
     usage: Option<ModelUsageReport>,
@@ -529,8 +530,17 @@ impl ModelClient for CapturingProvider {
         Ok(r#"{"score":92,"pass":true,"blocking_issues":[],"minor_issues":[],"recommendations":[]}"#.into())
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        Err("legacy embed should not be used for RAG retrieval".into())
+    }
+
+    async fn embed_with_kind(
+        &self,
+        texts: &[String],
+        kind: EmbeddingInputKind,
+    ) -> Result<Vec<Vec<f32>>, String> {
         *self.embed_calls.lock().unwrap() += 1;
+        self.embed_kinds.lock().unwrap().push(kind);
         Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
     }
 }
@@ -827,6 +837,11 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     .unwrap();
 
     assert!(result.ok);
+    assert_eq!(*provider.embed_calls.lock().unwrap(), 1);
+    assert_eq!(
+        *provider.embed_kinds.lock().unwrap(),
+        vec![EmbeddingInputKind::Query]
+    );
 
     let systems = provider.systems.lock().unwrap().join("\n---\n");
     assert!(!systems.contains("WRITING_CONTEXT_JSON"));

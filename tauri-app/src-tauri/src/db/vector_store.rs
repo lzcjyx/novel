@@ -185,6 +185,41 @@ pub fn source_content_hash_exists(
     Ok(count > 0)
 }
 
+pub fn source_content_hash_exists_with_embedding_metadata(
+    db: &Database,
+    project_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    content: &str,
+    embedding_metadata: &VectorEmbeddingMetadata,
+) -> Result<bool, String> {
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let source_id = source_id.unwrap_or("");
+    let content_hash = compute_content_hash(content);
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM vector_document_metadata
+             WHERE project_id = ?1 AND source_type = ?2 AND source_id = ?3
+               AND content_hash = ?4 AND embedding_provider = ?5
+               AND embedding_model = ?6 AND embedding_kind = ?7
+               AND embedding_dim = ?8",
+            params![
+                project_id,
+                source_type,
+                source_id,
+                content_hash,
+                embedding_metadata.provider.as_str(),
+                embedding_metadata.model.as_str(),
+                embedding_metadata.kind_key(),
+                embedding_metadata.dim,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Check vector embedding freshness: {}", e))?;
+    Ok(count > 0)
+}
+
 pub fn filter_vector_index_candidates(
     db: &Database,
     project_id: &str,
@@ -198,6 +233,28 @@ pub fn filter_vector_index_candidates(
             &candidate.source_type,
             Some(&candidate.source_id),
             &candidate.content,
+        )? {
+            pending.push(candidate);
+        }
+    }
+    Ok(pending)
+}
+
+pub fn filter_vector_index_candidates_with_embedding_metadata(
+    db: &Database,
+    project_id: &str,
+    candidates: Vec<VectorIndexCandidate>,
+    embedding_metadata: &VectorEmbeddingMetadata,
+) -> Result<Vec<VectorIndexCandidate>, String> {
+    let mut pending = Vec::new();
+    for candidate in candidates {
+        if !source_content_hash_exists_with_embedding_metadata(
+            db,
+            project_id,
+            &candidate.source_type,
+            Some(&candidate.source_id),
+            &candidate.content,
+            embedding_metadata,
         )? {
             pending.push(candidate);
         }

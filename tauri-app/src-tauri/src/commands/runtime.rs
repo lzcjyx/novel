@@ -19,7 +19,10 @@ pub async fn get_next_chapter_context_preview(
 
     if !retrieval_query.trim().is_empty() {
         if let Ok(embed_client) = get_embedding_provider(&state) {
-            if let Ok(embeddings) = embed_client.embed(&[retrieval_query]).await {
+            if let Ok(embeddings) = embed_client
+                .embed_with_kind(&[retrieval_query], ai::client::EmbeddingInputKind::Query)
+                .await
+            {
                 if let Some(query_embedding) = embeddings.first() {
                     retrieval_documents = db::vector_store::search_similar_documents(
                         &state.db,

@@ -1,4 +1,4 @@
-use crate::ai::client::{ModelClient, ModelUsageReport};
+use crate::ai::client::{EmbeddingInputKind, ModelClient, ModelUsageReport};
 use crate::db::connection::Database;
 use crate::db::model_profiles::ModelProfile;
 use crate::db::{bible, blog_posts, chapters, generation_jobs, projects, reviews};
@@ -477,7 +477,10 @@ pub async fn generate_next_chapter_with_stage_providers(
     if retrieval_query.trim().is_empty() {
         retrieval_detail = "empty retrieval query; using structured context".to_string();
     } else if let Some(embed_client) = emb_provider {
-        match embed_client.embed(&[retrieval_query.clone()]).await {
+        match embed_client
+            .embed_with_kind(&[retrieval_query.clone()], EmbeddingInputKind::Query)
+            .await
+        {
             Ok(embeddings) if !embeddings.is_empty() => {
                 match crate::db::vector_store::search_similar_documents(
                     db,
