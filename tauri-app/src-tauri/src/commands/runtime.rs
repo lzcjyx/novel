@@ -55,6 +55,47 @@ pub async fn get_next_chapter_context_preview(
 }
 
 #[tauri::command]
+pub async fn get_rag_health(
+    state: tauri::State<'_, AppState>,
+    project_id: String,
+) -> Result<db::vector_store::RagHealth, String> {
+    let settings = db::settings::get_settings(&state.db)?;
+    let (embedding_provider, embedding_model) =
+        if let Some(profile_id) = settings.embedding_model_profile_id.as_deref() {
+            let profile = db::model_profiles::get_model_profile(&state.db, profile_id)?;
+            (profile.provider, profile.model)
+        } else {
+            (
+                settings.embedding_provider.clone(),
+                settings.embedding_model.clone(),
+            )
+        };
+
+    if embedding_provider != "none" {
+        if let Err(e) = get_embedding_provider(&state) {
+            return Ok(db::vector_store::RagHealth {
+                state: "missing_key".into(),
+                message: format!("RAG embedding 密钥不可用：{e}"),
+                document_count: 0,
+                stale_count: 0,
+                embedding_provider,
+                embedding_model,
+                embedding_dim: settings.embedding_dim,
+                last_indexed_at: None,
+            });
+        }
+    }
+
+    db::vector_store::get_rag_health(
+        &state.db,
+        &project_id,
+        &embedding_provider,
+        &embedding_model,
+        settings.embedding_dim,
+    )
+}
+
+#[tauri::command]
 pub async fn get_context_rules(
     state: tauri::State<'_, AppState>,
     project_id: String,

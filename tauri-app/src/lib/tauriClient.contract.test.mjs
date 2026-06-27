@@ -68,3 +68,8 @@ test("runtime commands are exposed through the typed Tauri client", () => {
     assert.ok(source.includes(`"${command}"`), `missing command ${command}`);
   }
 });
+
+test("tauri client exposes RAG health command", () => {
+  assert.match(source, /getRagHealth<T>\(projectId: string\)/);
+  assert.match(source, /invoke<T>\("get_rag_health"/);
+});

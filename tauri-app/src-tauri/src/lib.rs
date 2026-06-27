@@ -1741,6 +1741,7 @@ pub fn run() {
             retry_chapter,
             get_chapter_plans,
             commands::runtime::get_next_chapter_context_preview,
+            commands::runtime::get_rag_health,
             get_chapters,
             get_chapter_versions,
             read_chapter_file,

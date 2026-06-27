@@ -197,6 +197,35 @@ fn migrations_add_content_hash_to_existing_vector_table_before_index() {
 }
 
 #[test]
+fn vector_metadata_schema_tracks_embedding_freshness() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("vector-freshness.db");
+    let db = Database::open(&db_path).unwrap();
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+
+    let columns = {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("PRAGMA table_info(vector_document_metadata)")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+
+    for column in [
+        "embedding_provider",
+        "embedding_model",
+        "embedding_kind",
+        "embedding_dim",
+        "indexed_at",
+    ] {
+        assert!(columns.contains(&column.to_string()), "missing {column}");
+    }
+}
+
+#[test]
 fn migrations_expand_generation_job_status_check_for_cancelled() {
     let dir = tempdir().unwrap();
     let db_path = dir.path().join("old-generation-job-status.db");

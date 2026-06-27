@@ -14,6 +14,10 @@ export const tauriClient = {
     });
   },
 
+  getRagHealth<T>(projectId: string): Promise<T> {
+    return invoke<T>("get_rag_health", { projectId });
+  },
+
   generateNextChapter<T>(
     projectId: string,
     force: boolean,

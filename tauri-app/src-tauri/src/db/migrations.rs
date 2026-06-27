@@ -11,24 +11,43 @@ pub fn run_migrations(db: &Database) -> Result<(), String> {
     migrate_generation_jobs_cancelled_status(&conn)?;
     migrate_chapter_versions_accepted_candidate_type(&conn)?;
 
-    let has_content_hash = {
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(vector_document_metadata)")
-            .map_err(|e| format!("Prepare vector schema check: {}", e))?;
-        let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| format!("Read vector schema: {}", e))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Collect vector schema: {}", e))?;
-        columns.iter().any(|column| column == "content_hash")
-    };
-    if !has_content_hash {
-        conn.execute(
-            "ALTER TABLE vector_document_metadata ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
-            [],
-        )
-        .map_err(|e| format!("Add vector content hash column: {}", e))?;
-    }
+    let vector_columns = vector_document_columns(&conn)?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "content_hash",
+        "ALTER TABLE vector_document_metadata ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "embedding_provider",
+        "ALTER TABLE vector_document_metadata ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "embedding_model",
+        "ALTER TABLE vector_document_metadata ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "embedding_kind",
+        "ALTER TABLE vector_document_metadata ADD COLUMN embedding_kind TEXT NOT NULL DEFAULT 'document'",
+    )?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "embedding_dim",
+        "ALTER TABLE vector_document_metadata ADD COLUMN embedding_dim INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_vector_column(
+        &conn,
+        &vector_columns,
+        "indexed_at",
+        "ALTER TABLE vector_document_metadata ADD COLUMN indexed_at TEXT",
+    )?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_vector_docs_content_hash ON vector_document_metadata(project_id, content_hash)",
         [],
@@ -58,6 +77,31 @@ pub fn run_migrations(db: &Database) -> Result<(), String> {
     }
 
     log::info!("Database migrations applied successfully.");
+    Ok(())
+}
+
+fn vector_document_columns(conn: &rusqlite::Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(vector_document_metadata)")
+        .map_err(|e| format!("Prepare vector schema check: {}", e))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("Read vector schema: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Collect vector schema: {}", e))?;
+    Ok(columns)
+}
+
+fn ensure_vector_column(
+    conn: &rusqlite::Connection,
+    existing_columns: &[String],
+    column: &str,
+    ddl: &str,
+) -> Result<(), String> {
+    if !existing_columns.iter().any(|existing| existing == column) {
+        conn.execute(ddl, [])
+            .map_err(|e| format!("Add vector column {column}: {e}"))?;
+    }
     Ok(())
 }
 

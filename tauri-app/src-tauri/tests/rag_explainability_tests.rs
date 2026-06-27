@@ -115,6 +115,78 @@ fn vector_documents_persist_content_hashes() {
 }
 
 #[test]
+fn rag_health_reports_empty_stale_and_usable_vector_index() {
+    let db = setup_db();
+    let project_id = insert_project(&db);
+
+    let empty = tauri_app_lib::db::vector_store::get_rag_health(
+        &db,
+        &project_id,
+        "openai_compat",
+        "BAAI/bge-m3",
+        2,
+    )
+    .unwrap();
+    assert_eq!(empty.state, "empty");
+    assert_eq!(empty.document_count, 0);
+
+    tauri_app_lib::db::vector_store::insert_vector_document(
+        &db,
+        &project_id,
+        "chapter",
+        Some("chapter-rag-health"),
+        "Legacy vector",
+        "The legacy vector still has the same chapter text.",
+        "{}",
+        &[1.0, 0.0],
+    )
+    .unwrap();
+    let stale = tauri_app_lib::db::vector_store::get_rag_health(
+        &db,
+        &project_id,
+        "openai_compat",
+        "BAAI/bge-m3",
+        2,
+    )
+    .unwrap();
+    assert_eq!(stale.state, "stale");
+    assert_eq!(stale.document_count, 1);
+    assert_eq!(stale.stale_count, 1);
+
+    let embedding = [0.5, 0.5];
+    let metadata = tauri_app_lib::db::vector_store::VectorEmbeddingMetadata::new(
+        "openai_compat",
+        "BAAI/bge-m3",
+        tauri_app_lib::ai::client::EmbeddingInputKind::Document,
+        &embedding,
+    );
+    tauri_app_lib::db::vector_store::insert_vector_document_with_embedding_metadata(
+        &db,
+        &project_id,
+        "chapter",
+        Some("chapter-rag-health"),
+        "Fresh vector",
+        "The legacy vector still has the same chapter text.",
+        "{}",
+        &embedding,
+        &metadata,
+    )
+    .unwrap();
+    let usable = tauri_app_lib::db::vector_store::get_rag_health(
+        &db,
+        &project_id,
+        "openai_compat",
+        "BAAI/bge-m3",
+        2,
+    )
+    .unwrap();
+    assert_eq!(usable.state, "usable");
+    assert_eq!(usable.document_count, 1);
+    assert_eq!(usable.stale_count, 0);
+    assert!(usable.last_indexed_at.is_some());
+}
+
+#[test]
 fn duplicate_vector_document_content_reuses_existing_doc() {
     let db = setup_db();
     let project_id = insert_project(&db);

@@ -1,3 +1,4 @@
+use crate::ai::client::EmbeddingInputKind;
 use crate::db::connection::Database;
 use crate::models::VectorDocument;
 use rusqlite::{params, OptionalExtension};
@@ -50,6 +51,49 @@ impl VectorIndexCandidate {
             metadata: metadata.into(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct VectorEmbeddingMetadata {
+    pub provider: String,
+    pub model: String,
+    pub kind: EmbeddingInputKind,
+    pub dim: i32,
+}
+
+impl VectorEmbeddingMetadata {
+    pub fn new(
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        kind: EmbeddingInputKind,
+        embedding: &[f32],
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            kind,
+            dim: embedding.len() as i32,
+        }
+    }
+
+    pub fn kind_key(&self) -> &'static str {
+        match self.kind {
+            EmbeddingInputKind::Document => "document",
+            EmbeddingInputKind::Query => "query",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagHealth {
+    pub state: String,
+    pub message: String,
+    pub document_count: i64,
+    pub stale_count: i64,
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_dim: i32,
+    pub last_indexed_at: Option<String>,
 }
 
 /// Serialize f32 slice to BLOB bytes for SQLite storage (little-endian)
@@ -196,6 +240,32 @@ pub fn insert_vector_document(
     metadata: &str,
     embedding: &[f32],
 ) -> Result<String, String> {
+    let embedding_metadata =
+        VectorEmbeddingMetadata::new("legacy", "unknown", EmbeddingInputKind::Document, embedding);
+    insert_vector_document_with_embedding_metadata(
+        db,
+        project_id,
+        source_type,
+        source_id,
+        title,
+        content,
+        metadata,
+        embedding,
+        &embedding_metadata,
+    )
+}
+
+pub fn insert_vector_document_with_embedding_metadata(
+    db: &Database,
+    project_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+    title: &str,
+    content: &str,
+    metadata: &str,
+    embedding: &[f32],
+    embedding_metadata: &VectorEmbeddingMetadata,
+) -> Result<String, String> {
     let id = Database::new_uuid();
     let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
     let source_id = source_id.unwrap_or("");
@@ -205,9 +275,20 @@ pub fn insert_vector_document(
             "SELECT id
              FROM vector_document_metadata
              WHERE project_id = ?1 AND source_type = ?2 AND source_id = ?3 AND content_hash = ?4
+               AND embedding_provider = ?5 AND embedding_model = ?6
+               AND embedding_kind = ?7 AND embedding_dim = ?8
              ORDER BY created_at ASC
              LIMIT 1",
-            params![project_id, source_type, source_id, content_hash],
+            params![
+                project_id,
+                source_type,
+                source_id,
+                content_hash,
+                embedding_metadata.provider.as_str(),
+                embedding_metadata.model.as_str(),
+                embedding_metadata.kind_key(),
+                embedding_metadata.dim,
+            ],
             |row| row.get(0),
         )
         .optional()
@@ -220,8 +301,8 @@ pub fn insert_vector_document(
     if !source_id.is_empty() {
         conn.execute(
             "DELETE FROM vector_document_metadata
-             WHERE project_id = ?1 AND source_type = ?2 AND source_id = ?3 AND content_hash <> ?4",
-            params![project_id, source_type, source_id, content_hash],
+             WHERE project_id = ?1 AND source_type = ?2 AND source_id = ?3",
+            params![project_id, source_type, source_id],
         )
         .map_err(|e| format!("Delete stale vector docs: {}", e))?;
     }
@@ -229,12 +310,101 @@ pub fn insert_vector_document(
     let blob = f32_to_blob(embedding);
 
     conn.execute(
-        "INSERT INTO vector_document_metadata (id, project_id, source_type, source_id, title, content, content_hash, metadata, embedding)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        params![id, project_id, source_type, source_id, title, content, content_hash, metadata, blob],
-    ).map_err(|e| format!("Insert vector doc: {}", e))?;
+        "INSERT INTO vector_document_metadata
+         (id, project_id, source_type, source_id, title, content, content_hash, metadata,
+          embedding, embedding_provider, embedding_model, embedding_kind, embedding_dim, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, datetime('now'))",
+        params![
+            id,
+            project_id,
+            source_type,
+            source_id,
+            title,
+            content,
+            content_hash,
+            metadata,
+            blob,
+            embedding_metadata.provider.as_str(),
+            embedding_metadata.model.as_str(),
+            embedding_metadata.kind_key(),
+            embedding_metadata.dim,
+        ],
+    )
+    .map_err(|e| format!("Insert vector doc: {}", e))?;
 
     Ok(id)
+}
+
+pub fn get_rag_health(
+    db: &Database,
+    project_id: &str,
+    embedding_provider: &str,
+    embedding_model: &str,
+    embedding_dim: i32,
+) -> Result<RagHealth, String> {
+    let provider = embedding_provider.trim();
+    let model = embedding_model.trim();
+    if provider.is_empty() || provider == "none" {
+        return Ok(RagHealth {
+            state: "disabled".into(),
+            message: "RAG 向量检索未启用。".into(),
+            document_count: 0,
+            stale_count: 0,
+            embedding_provider: provider.into(),
+            embedding_model: model.into(),
+            embedding_dim,
+            last_indexed_at: None,
+        });
+    }
+
+    let conn = db.conn.lock().map_err(|e| format!("Lock: {}", e))?;
+    let (document_count, stale_count, last_indexed_at): (i64, Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE
+                        WHEN embedding_provider <> ?2
+                          OR embedding_model <> ?3
+                          OR embedding_kind <> 'document'
+                          OR embedding_dim <> ?4
+                        THEN 1 ELSE 0 END),
+                    MAX(indexed_at)
+             FROM vector_document_metadata
+             WHERE project_id = ?1",
+            params![project_id, provider, model, embedding_dim],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("Read RAG health: {}", e))?;
+    let stale_count = stale_count.unwrap_or(0);
+
+    let (state, message) = if document_count == 0 {
+        (
+            "empty",
+            format!("RAG 已配置为 {provider}/{model}，但当前项目还没有向量索引。"),
+        )
+    } else if stale_count > 0 {
+        (
+            "stale",
+            format!(
+                "RAG 索引需要重建：{stale_count}/{document_count} 条向量与当前 embedding 配置不一致。"
+            ),
+        )
+    } else {
+        (
+            "usable",
+            format!("RAG 可用：{document_count} 条向量已匹配当前 embedding 配置。"),
+        )
+    };
+
+    Ok(RagHealth {
+        state: state.into(),
+        message,
+        document_count,
+        stale_count,
+        embedding_provider: provider.into(),
+        embedding_model: model.into(),
+        embedding_dim,
+        last_indexed_at,
+    })
 }
 
 /// Search similar documents using real cosine similarity against stored embeddings.
