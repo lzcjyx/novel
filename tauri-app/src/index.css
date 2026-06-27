@@ -514,6 +514,157 @@ body {
   color: var(--on-dark);
 }
 
+/* Runtime workflow console */
+.runtime-console {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.runtime-taskbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(240px, 360px) minmax(220px, 320px);
+  gap: var(--space-md);
+  align-items: end;
+  padding-bottom: var(--space-md);
+  border-bottom: 1px solid var(--control-stroke);
+}
+.runtime-taskbar .page-title {
+  margin-bottom: 4px;
+}
+.runtime-plan-picker label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--on-dark-mute);
+  font-size: var(--text-caption-sm);
+}
+.runtime-rag-chip {
+  min-height: 58px;
+  padding: 9px 11px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--radius-md);
+  background: var(--surface-solid);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.runtime-rag-chip strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+.runtime-rag-chip span {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.runtime-rag-usable { border-color: var(--success); }
+.runtime-rag-stale,
+.runtime-rag-empty,
+.runtime-rag-disabled,
+.runtime-rag-missing_key,
+.runtime-rag-dimension_mismatch,
+.runtime-rag-error,
+.runtime-rag-unknown {
+  border-color: var(--warning);
+}
+.runtime-phase-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+.runtime-phase-tab {
+  min-height: 58px;
+  padding: 8px 10px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--radius-sm);
+  background: var(--surface-solid);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+.runtime-phase-tab:hover {
+  background: var(--control-fill-hover);
+}
+.runtime-phase-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+.runtime-phase-tab strong,
+.runtime-phase-tab span {
+  display: block;
+}
+.runtime-phase-tab span {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.runtime-plan-outline {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--radius-sm);
+  background: var(--surface-subtle);
+  color: var(--on-dark-body);
+  line-height: 1.55;
+}
+.runtime-phase-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 360px);
+  gap: var(--space-md);
+  align-items: start;
+}
+.runtime-phase-panel-stack {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.runtime-panel-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+.runtime-panel-section,
+.runtime-panel-side {
+  min-width: 0;
+  padding: var(--space-lg);
+  border: 1px solid var(--control-stroke);
+  border-radius: var(--radius-md);
+  background: var(--surface-solid);
+}
+.runtime-panel-section .section-title,
+.runtime-panel-side .section-title {
+  margin-bottom: var(--space-md);
+}
+.runtime-binding-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.runtime-binding-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--control-stroke);
+}
+.runtime-binding-row strong,
+.runtime-binding-row span {
+  min-width: 0;
+}
+.runtime-binding-row span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.runtime-rag-stats {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 /* Chapter production console */
 .writer-console {
   display: grid;
@@ -2178,6 +2329,16 @@ body {
   .mode-segments { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .control-grid { grid-template-columns: 1fr; }
   .context-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-taskbar,
+  .runtime-phase-panel {
+    grid-template-columns: 1fr;
+  }
+  .runtime-phase-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .runtime-binding-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .job-metric-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .job-header { flex-direction: column; }
   .quality-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
