@@ -36,6 +36,7 @@ AI-Novels/
 *.sqlite3-*
 
 # Browser and test artifacts
+.superpowers/
 playwright-report/
 test-results/
 coverage/
