@@ -42,6 +42,22 @@ export const tauriClient = {
     return invoke<void>("reset_running", { projectId });
   },
 
+  showPetWindow(): Promise<void> {
+    return invoke<void>("show_pet_window");
+  },
+
+  hidePetWindow(): Promise<void> {
+    return invoke<void>("hide_pet_window");
+  },
+
+  showMainWindow(): Promise<void> {
+    return invoke<void>("show_main_window");
+  },
+
+  savePetPosition(x: number, y: number): Promise<void> {
+    return invoke<void>("save_pet_position", { x, y });
+  },
+
   getContextRules<T>(projectId: string): Promise<T> {
     return invoke<T>("get_context_rules", { projectId });
   },

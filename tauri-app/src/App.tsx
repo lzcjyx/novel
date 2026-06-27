@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, createContext, useContext, useRef, useMemo, type PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { clampGraphPosition, createGraphBasePositions, flowGraphPosition, positionFromClientPoint, type GraphPosition } from "./graphLayout.js";
 import { tauriClient } from "./lib/tauriClient";
+import { PetWindow } from "./pages/PetWindow";
 import { RuntimePage } from "./pages/RuntimePage";
 
 // ---- Types ----
@@ -27,7 +28,7 @@ interface JobMetadata { phase_events?: JobPhaseEvent[]; phase_summary?: JobPhase
 interface GenerationResult { ok: boolean; message: string; chapter_id?: string; chapter_title?: string; sequence?: number; word_count?: number; final_score?: number; decision?: string; }
 interface StatusResponse { ok: boolean; novel?: { name: string; genre?: string; }; slug?: string; chapter_count?: number; chapters_today?: number; plans_left?: number; total_words?: number; is_running: boolean; }
 interface BibleData { characters: any[]; locations: any[]; organizations: any[]; items: any[]; world_lore: any[]; magic_systems: any[]; canon_rules: any[]; plot_threads: any[]; foreshadowing: any[]; style_guides: any[]; timeline_events: any[]; }
-interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; }
+interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; pet_enabled: boolean; pet_animation_level: string; pet_compact_mode: boolean; pet_position_x: number; pet_position_y: number; }
 interface Project { id: string; name: string; }
 interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; }
 type NullableNumber = number | null | undefined;
@@ -79,6 +80,9 @@ const useApp = () => useContext(Ctx);
 
 // ---- Main App ----
 function App() {
+  const isPetWindow = new URLSearchParams(window.location.search).get("window") === "pet";
+  if (isPetWindow) return <PetWindow />;
+
   const [page, setPage] = useState("dashboard");
   const [projects, setProjects] = useState<ProjectStats[]>([]);
   const [selected, setSelected] = useState("");
@@ -106,6 +110,13 @@ function App() {
 
   useEffect(() => { loadProjects(); refreshSettings(); loadLogs(); }, []);
   useEffect(() => { if (selected) loadStatus(); const t = setInterval(() => { if (selected) loadStatus(); loadLogs(); }, 10000); return () => clearInterval(t); }, [selected]);
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    listen("open-settings", () => setPage("settings")).then((u) => { unlisten = u; });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
   useEffect(() => {
     const refreshAfterResume = () => {
       loadProjects();
@@ -146,6 +157,31 @@ function App() {
     settings: "S",
   };
   const selectedProject = projects.find(project => project.id === selected);
+
+  useEffect(() => {
+    const ragState = settings?.embedding_provider && settings.embedding_provider !== "none"
+      ? "usable"
+      : "disabled";
+    void emitTo("pet", "pet-status", {
+      selected,
+      projectName: selectedProject?.name,
+      loading,
+      running: Boolean(status?.is_running),
+      message: msg,
+      ragState,
+      animationLevel: settings?.pet_animation_level || "subtle",
+      compact: Boolean(settings?.pet_compact_mode),
+    }).catch(() => {});
+  }, [
+    selected,
+    selectedProject?.name,
+    loading,
+    status?.is_running,
+    msg,
+    settings?.embedding_provider,
+    settings?.pet_animation_level,
+    settings?.pet_compact_mode,
+  ]);
 
   const renderPage = () => {
     switch (page) {
@@ -1767,6 +1803,35 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
             <input type="checkbox" checked={settings.debug_mode} onChange={e => {
               invoke("update_settings", { settings: { ...settings, debug_mode: e.target.checked } }).then(refreshSettings);
             }} />
+          </div>
+          <div className="pet-settings-panel">
+            <h3 className="section-title">桌面宠物</h3>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.pet_enabled} onChange={e => {
+                const enabled = e.target.checked;
+                invoke("update_settings", { settings: { ...settings, pet_enabled: enabled } })
+                  .then(() => enabled ? tauriClient.showPetWindow() : tauriClient.hidePetWindow())
+                  .then(refreshSettings);
+              }} />
+              开启宠物
+            </label>
+            <div className="bible-edit-field">
+              <label>动画级别</label>
+              <select className="select" value={settings.pet_animation_level || "subtle"} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, pet_animation_level: e.target.value } }).then(refreshSettings);
+              }}>
+                <option value="static">静态</option>
+                <option value="subtle">轻微</option>
+                <option value="lively">活跃</option>
+              </select>
+            </div>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.pet_compact_mode} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, pet_compact_mode: e.target.checked } }).then(refreshSettings);
+              }} />
+              紧凑显示
+            </label>
+            <div className="text-meta">宠物只读取现有运行状态，不会增加额外后台任务。</div>
           </div>
         </div>
       )}

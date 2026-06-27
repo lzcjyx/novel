@@ -73,3 +73,12 @@ test("tauri client exposes RAG health command", () => {
   assert.match(source, /getRagHealth<T>\(projectId: string\)/);
   assert.match(source, /invoke<T>\("get_rag_health"/);
 });
+
+test("tauri client exposes desktop pet window commands", () => {
+  assert.match(source, /showPetWindow\(\): Promise<void>/);
+  assert.match(source, /hidePetWindow\(\): Promise<void>/);
+  assert.match(source, /showMainWindow\(\): Promise<void>/);
+  assert.match(source, /invoke<void>\("show_pet_window"/);
+  assert.match(source, /invoke<void>\("hide_pet_window"/);
+  assert.match(source, /invoke<void>\("show_main_window"/);
+});

@@ -195,7 +195,7 @@ pub fn project_is_running(
     db::generation_jobs::is_job_running(db, project_id)
 }
 
-fn show_main_window(app: &tauri::AppHandle) {
+fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -208,6 +208,20 @@ fn show_main_window(app: &tauri::AppHandle) {
                 "timestamp": chrono::Local::now().format("%H:%M:%S").to_string(),
             }),
         );
+    }
+}
+
+fn apply_pet_window_preferences(app: &tauri::AppHandle, settings: &AppSettings) {
+    if let Some(window) = app.get_webview_window("pet") {
+        let _ = window.set_position(tauri::PhysicalPosition::new(
+            settings.pet_position_x,
+            settings.pet_position_y,
+        ));
+        if settings.pet_enabled {
+            let _ = window.show();
+        } else {
+            let _ = window.hide();
+        }
     }
 }
 
@@ -1388,6 +1402,52 @@ async fn update_settings(
 }
 
 #[tauri::command]
+async fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    focus_main_window(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn show_pet_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut settings = db::settings::get_settings(&state.db)?;
+    settings.pet_enabled = true;
+    db::settings::save_settings(&state.db, &settings)?;
+    apply_pet_window_preferences(&app, &settings);
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_pet_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut settings = db::settings::get_settings(&state.db)?;
+    settings.pet_enabled = false;
+    db::settings::save_settings(&state.db, &settings)?;
+    if let Some(window) = app.get_webview_window("pet") {
+        window
+            .hide()
+            .map_err(|e| format!("Hide pet window: {}", e))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_pet_position(
+    state: tauri::State<'_, AppState>,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let mut settings = db::settings::get_settings(&state.db)?;
+    settings.pet_position_x = x;
+    settings.pet_position_y = y;
+    db::settings::save_settings(&state.db, &settings)
+}
+
+#[tauri::command]
 async fn set_api_key(
     state: tauri::State<'_, AppState>,
     provider: String,
@@ -1694,6 +1754,11 @@ pub fn run() {
                 logs: Mutex::new(Vec::new()),
                 running: Mutex::new(false),
             });
+            if let Some(state) = app.try_state::<AppState>() {
+                if let Ok(settings) = db::settings::get_settings(&state.db) {
+                    apply_pet_window_preferences(app.handle(), &settings);
+                }
+            }
 
             // Close button minimizes to system tray (quit via tray menu)
             if let Some(window) = app.get_webview_window("main") {
@@ -1736,10 +1801,10 @@ pub fn run() {
             let _tray = tray_builder
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => {
-                        show_main_window(app);
+                        focus_main_window(app);
                     }
                     "write" => {
-                        show_main_window(app);
+                        focus_main_window(app);
                     }
                     "quit" => {
                         if let Some(state) = app.try_state::<AppState>() {
@@ -1761,7 +1826,7 @@ pub fn run() {
                     } = event
                     {
                         let app = tray.app_handle();
-                        show_main_window(app);
+                        focus_main_window(app);
                     }
                 })
                 .build(app)?;
@@ -1820,6 +1885,10 @@ pub fn run() {
             delete_knowledge_graph_edge,
             get_settings,
             update_settings,
+            show_main_window,
+            show_pet_window,
+            hide_pet_window,
+            save_pet_position,
             set_api_key,
             test_model_provider,
             test_embedding_provider,

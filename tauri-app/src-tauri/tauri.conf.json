@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "AI Novel Factory",
+        "label": "main",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -20,6 +21,22 @@
         "center": true,
         "resizable": true,
         "decorations": false
+      },
+      {
+        "label": "pet",
+        "title": "AI Novel Factory Pet",
+        "url": "index.html?window=pet",
+        "width": 220,
+        "height": 96,
+        "minWidth": 92,
+        "minHeight": 76,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": true,
+        "shadow": false
       }
     ],
     "security": {

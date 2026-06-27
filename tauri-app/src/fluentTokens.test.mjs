@@ -92,3 +92,33 @@ test("graph workbench uses light Fluent graph tokens", () => {
   assert.match(css, /\.graph-node-degree/);
   assert.doesNotMatch(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*208,\s*168,\s*92/);
 });
+
+test("desktop pet is configurable and status aware without canvas animation", () => {
+  assert.doesNotMatch(app, /function AppPet/);
+  assert.match(app, /PetWindow/);
+  assert.match(app, /settings\.pet_enabled/);
+  assert.match(app, /pet_animation_level/);
+  assert.match(app, /pet_compact_mode/);
+  assert.match(css, /\.pet-window/);
+  assert.match(css, /\.pet-window-static/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
+  assert.doesNotMatch(app, /requestAnimationFrame\(.*pet/i);
+});
+
+test("desktop pet runs in an independent transparent Tauri window", () => {
+  const config = JSON.parse(tauriConfig);
+  const petWindow = config.app.windows.find((window) => window.label === "pet");
+  assert.ok(petWindow, "missing pet window");
+  assert.equal(petWindow.transparent, true);
+  assert.equal(petWindow.decorations, false);
+  assert.equal(petWindow.alwaysOnTop, true);
+  assert.equal(petWindow.skipTaskbar, true);
+  assert.ok(capabilities.windows.includes("pet"));
+  assert.match(app, /new URLSearchParams\(window\.location\.search\)\.get\("window"\) === "pet"/);
+  assert.match(app, /<PetWindow \/>/);
+  assert.match(app, /emitTo\("pet", "pet-status"/);
+  assert.doesNotMatch(app, /function AppPet/);
+  assert.match(css, /\.pet-window/);
+  assert.match(css, /\.pet-face/);
+  assert.match(css, /\.pet-bubble/);
+});

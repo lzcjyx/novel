@@ -287,6 +287,29 @@ fn migrations_expand_generation_job_status_check_for_cancelled() {
 }
 
 #[test]
+fn settings_round_trip_pet_preferences() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("pet-settings.db");
+    let db = Database::open(&db_path).unwrap();
+    tauri_app_lib::db::run_migrations(&db).unwrap();
+
+    let mut settings = tauri_app_lib::db::settings::get_settings(&db).unwrap();
+    settings.pet_enabled = false;
+    settings.pet_animation_level = "static".to_string();
+    settings.pet_compact_mode = true;
+    settings.pet_position_x = 320;
+    settings.pet_position_y = 240;
+    tauri_app_lib::db::settings::save_settings(&db, &settings).unwrap();
+
+    let loaded = tauri_app_lib::db::settings::get_settings(&db).unwrap();
+    assert!(!loaded.pet_enabled);
+    assert_eq!(loaded.pet_animation_level, "static");
+    assert!(loaded.pet_compact_mode);
+    assert_eq!(loaded.pet_position_x, 320);
+    assert_eq!(loaded.pet_position_y, 240);
+}
+
+#[test]
 fn test_project_crud() {
     let (conn, _dir) = setup_db();
     let id = uuid();

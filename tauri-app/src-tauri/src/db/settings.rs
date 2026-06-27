@@ -95,6 +95,28 @@ pub fn get_settings(db: &Database) -> Result<AppSettings, String> {
             "summarization_model_profile_id" => {
                 settings.summarization_model_profile_id = parse_optional_string(v)
             }
+            "pet_enabled" => {
+                settings.pet_enabled = v != "false";
+            }
+            "pet_animation_level" => {
+                settings.pet_animation_level = match v {
+                    "static" | "subtle" | "lively" => v.to_string(),
+                    _ => "subtle".to_string(),
+                };
+            }
+            "pet_compact_mode" => {
+                settings.pet_compact_mode = v == "true";
+            }
+            "pet_position_x" => {
+                if let Ok(d) = v.parse() {
+                    settings.pet_position_x = d;
+                }
+            }
+            "pet_position_y" => {
+                if let Ok(d) = v.parse() {
+                    settings.pet_position_y = d;
+                }
+            }
             _ => {}
         }
     }
@@ -231,5 +253,30 @@ pub fn save_settings(db: &Database, settings: &AppSettings) -> Result<(), String
         "summarization_model_profile_id",
         settings.summarization_model_profile_id.as_deref(),
     )?;
+    save_setting(
+        db,
+        "pet_enabled",
+        if settings.pet_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    save_setting(
+        db,
+        "pet_animation_level",
+        &format!("\"{}\"", settings.pet_animation_level),
+    )?;
+    save_setting(
+        db,
+        "pet_compact_mode",
+        if settings.pet_compact_mode {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    save_setting(db, "pet_position_x", &settings.pet_position_x.to_string())?;
+    save_setting(db, "pet_position_y", &settings.pet_position_y.to_string())?;
     Ok(())
 }

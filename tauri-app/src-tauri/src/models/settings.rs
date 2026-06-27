@@ -25,6 +25,11 @@ pub struct AppSettings {
     pub repair_model_profile_id: Option<String>,
     pub embedding_model_profile_id: Option<String>,
     pub summarization_model_profile_id: Option<String>,
+    pub pet_enabled: bool,
+    pub pet_animation_level: String,
+    pub pet_compact_mode: bool,
+    pub pet_position_x: i32,
+    pub pet_position_y: i32,
 }
 
 impl Default for AppSettings {
@@ -57,6 +62,11 @@ impl Default for AppSettings {
             repair_model_profile_id: None,
             embedding_model_profile_id: None,
             summarization_model_profile_id: None,
+            pet_enabled: true,
+            pet_animation_level: "subtle".into(),
+            pet_compact_mode: false,
+            pet_position_x: 64,
+            pet_position_y: 160,
         }
     }
 }
