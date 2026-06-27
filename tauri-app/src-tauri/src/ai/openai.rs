@@ -1,5 +1,5 @@
 use super::deepseek::DeepSeekProvider;
-use crate::ai::client::{ModelClient, ModelUsageReport};
+use crate::ai::client::{EmbeddingInputKind, ModelClient, ModelUsageReport};
 use async_trait::async_trait;
 use serde_json::Value; // Same API shape, reuse implementation approach
 
@@ -100,7 +100,11 @@ impl ModelClient for OpenAIProvider {
             .await
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    async fn embed_with_kind(
+        &self,
+        texts: &[String],
+        kind: EmbeddingInputKind,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let deepseek = DeepSeekProvider {
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
@@ -108,6 +112,11 @@ impl ModelClient for OpenAIProvider {
             embedding_model: self.embedding_model.clone(),
             timeout_secs: self.timeout_secs,
         };
-        deepseek.embed(texts).await
+        deepseek.embed_with_kind(texts, kind).await
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_with_kind(texts, EmbeddingInputKind::Document)
+            .await
     }
 }

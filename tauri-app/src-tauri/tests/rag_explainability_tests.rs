@@ -242,6 +242,32 @@ fn vector_index_candidates_skip_unchanged_content_hashes() {
     assert_eq!(pending_sources, vec!["chapter-changed", "chapter-new"]);
 }
 
+#[test]
+fn bge_m3_embedding_inputs_are_prepared_asymmetricly() {
+    let docs = vec!["旧车站的怀表线索".to_string()];
+    let queries = vec!["本章需要找回怀表".to_string()];
+
+    let document_inputs = tauri_app_lib::ai::deepseek::prepare_embedding_inputs(
+        "BAAI/bge-m3",
+        tauri_app_lib::ai::client::EmbeddingInputKind::Document,
+        &docs,
+    );
+    let query_inputs = tauri_app_lib::ai::deepseek::prepare_embedding_inputs(
+        "BAAI/bge-m3",
+        tauri_app_lib::ai::client::EmbeddingInputKind::Query,
+        &queries,
+    );
+    let ordinary_inputs = tauri_app_lib::ai::deepseek::prepare_embedding_inputs(
+        "text-embedding-3-small",
+        tauri_app_lib::ai::client::EmbeddingInputKind::Query,
+        &queries,
+    );
+
+    assert_eq!(document_inputs, vec!["passage: 旧车站的怀表线索"]);
+    assert_eq!(query_inputs, vec!["query: 本章需要找回怀表"]);
+    assert_eq!(ordinary_inputs, queries);
+}
+
 #[derive(Default)]
 struct CountingEmbeddingProvider {
     batches: Mutex<Vec<Vec<String>>>,

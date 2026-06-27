@@ -1,4 +1,4 @@
-use crate::ai::client::{ModelClient, ModelUsageReport};
+use crate::ai::client::{EmbeddingInputKind, ModelClient, ModelUsageReport};
 use crate::ai::preview_chars;
 use crate::ai::types::*;
 use async_trait::async_trait;
@@ -155,6 +155,30 @@ impl DeepSeekProvider {
     }
 }
 
+fn is_bge_m3_model(model: &str) -> bool {
+    let normalized = model.to_ascii_lowercase();
+    normalized == "bge-m3" || normalized.ends_with("/bge-m3")
+}
+
+pub fn prepare_embedding_inputs(
+    model: &str,
+    kind: EmbeddingInputKind,
+    texts: &[String],
+) -> Vec<String> {
+    if !is_bge_m3_model(model) {
+        return texts.to_vec();
+    }
+
+    let prefix = match kind {
+        EmbeddingInputKind::Document => "passage: ",
+        EmbeddingInputKind::Query => "query: ",
+    };
+    texts
+        .iter()
+        .map(|text| format!("{}{}", prefix, text.trim()))
+        .collect()
+}
+
 #[async_trait]
 impl ModelClient for DeepSeekProvider {
     async fn generate_json(
@@ -197,7 +221,11 @@ impl ModelClient for DeepSeekProvider {
         self.chat_with_usage(system, user, max_tokens, false).await
     }
 
-    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    async fn embed_with_kind(
+        &self,
+        texts: &[String],
+        kind: EmbeddingInputKind,
+    ) -> Result<Vec<Vec<f32>>, String> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .build()
@@ -208,10 +236,11 @@ impl ModelClient for DeepSeekProvider {
         } else {
             format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'))
         };
+        let prepared_inputs = prepare_embedding_inputs(&self.embedding_model, kind, texts);
         let resp = client
             .post(&emb_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&json!({"model": self.embedding_model, "input": texts}))
+            .json(&json!({"model": self.embedding_model, "input": prepared_inputs}))
             .send()
             .await
             .map_err(|e| format!("HTTP: {}", e))?
@@ -220,5 +249,10 @@ impl ModelClient for DeepSeekProvider {
             .map_err(|e| format!("Parse: {}", e))?;
 
         Ok(resp.data.into_iter().map(|d| d.embedding).collect())
+    }
+
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_with_kind(texts, EmbeddingInputKind::Document)
+            .await
     }
 }
