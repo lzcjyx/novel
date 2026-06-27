@@ -122,3 +122,9 @@ test("desktop pet runs in an independent transparent Tauri window", () => {
   assert.match(css, /\.pet-face/);
   assert.match(css, /\.pet-bubble/);
 });
+
+test("main shell no longer renders the pet inside the main window", () => {
+  assert.doesNotMatch(app, /function AppPet/);
+  assert.doesNotMatch(app, /className=\{`app-pet/);
+  assert.match(app, /PetWindow/);
+});

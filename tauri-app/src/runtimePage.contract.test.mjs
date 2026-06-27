@@ -58,3 +58,23 @@ test("runtime page is organized as a five phase workflow console", () => {
   assert.match(runtimeSource, /workflowBindings/);
   assert.doesNotMatch(runtimeSource, /className="status-grid" style=\{\{ gridTemplateColumns: "repeat\(auto-fit, minmax\(320px, 1fr\)\)"/);
 });
+
+test("runtime feature entry points are grouped by workflow responsibility", () => {
+  const expectedGroups = [
+    "模型路由",
+    "RAG 健康",
+    "手动上下文规则",
+    "SillyTavern Lorebook JSON",
+    "操作配方",
+    "提示词预设",
+    "草稿候选",
+    "项目包",
+    "小说圣经包",
+    "扩展 Manifest",
+  ];
+  for (const group of expectedGroups) {
+    assert.ok(runtimeSource.includes(group), `missing grouped capability ${group}`);
+  }
+  assert.equal((runtimeSource.match(/扩展 Manifest/g) || []).length, 1);
+  assert.equal((runtimeSource.match(/项目包/g) || []).length, 1);
+});

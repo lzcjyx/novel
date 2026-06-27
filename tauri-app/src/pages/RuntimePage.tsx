@@ -273,7 +273,7 @@ export function RuntimePage({ selected, settings, refreshSettings }: RuntimePage
     try {
       const packagePayload = await tauriClient.exportProjectPackage<any>(selected);
       setProjectPackageJson(JSON.stringify(packagePayload, null, 2));
-      setRuntimeMsg("项目包已导出");
+      setRuntimeMsg("项目归档已导出");
     } catch (e: any) {
       setRuntimeMsg("错误：" + String(e));
     }
@@ -282,7 +282,7 @@ export function RuntimePage({ selected, settings, refreshSettings }: RuntimePage
   const importProjectPackage = async () => {
     try {
       const importedId = await tauriClient.importProjectPackage(JSON.parse(projectPackageJson));
-      setRuntimeMsg(`项目包已导入：${importedId.slice(0, 8)}`);
+      setRuntimeMsg(`归档已导入：${importedId.slice(0, 8)}`);
     } catch (e: any) {
       setRuntimeMsg("错误：" + String(e));
     }
@@ -727,8 +727,8 @@ export function RuntimePage({ selected, settings, refreshSettings }: RuntimePage
           <button className="btn btn-primary btn-sm" onClick={importProjectPackage} disabled={!projectPackageJson.trim()}>作为新项目导入</button>
         </div>
         <div className="bible-edit-field">
-          <label>项目包 JSON</label>
-          <textarea value={projectPackageJson} onChange={e => setProjectPackageJson(e.target.value)} placeholder="导出项目或粘贴项目包。" />
+          <label>归档 JSON</label>
+          <textarea value={projectPackageJson} onChange={e => setProjectPackageJson(e.target.value)} placeholder="导出项目或粘贴归档。" />
         </div>
       </section>
 
