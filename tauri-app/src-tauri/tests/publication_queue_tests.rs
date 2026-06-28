@@ -142,6 +142,36 @@ fn firefly_markdown_renderer_uses_valid_frontmatter_and_redacts_internal_metadat
 }
 
 #[test]
+fn firefly_publish_redacts_secrets_paths_and_commit_messages() {
+    let post = StaticSitePost {
+        title: "发布 sk-123456789012345678901234".to_string(),
+        slug: "privacy-check".to_string(),
+        published: "2026-06-28".to_string(),
+        description: "本地路径 D:\\novel\\private.db 与 Bearer abcdefghijklmnopqrstuvwxyz"
+            .to_string(),
+        tags: vec!["token=abcdefghijklmnopqrstuvwxyz".to_string()],
+        category: Some("C:\\Users\\secret\\drafts".to_string()),
+        lang: Some("zh-CN".to_string()),
+        body_markdown: "正文可见\napi_key=abcdefghijklmnopqrstuvwxyz\n路径 D:\\novel\\private.db\nBearer abcdefghijklmnopqrstuvwxyz".to_string(),
+    };
+
+    let markdown = render_firefly_markdown(&post);
+    assert!(!markdown.contains("sk-123456789012345678901234"));
+    assert!(!markdown.contains("D:\\novel"));
+    assert!(!markdown.contains("C:\\Users"));
+    assert!(!markdown.contains("abcdefghijklmnopqrstuvwxyz"));
+    assert!(markdown.contains("***REDACTED***"));
+    assert!(markdown.contains("[LOCAL_PATH_REDACTED]"));
+
+    let redacted_commit =
+        tauri_app_lib::workflow::static_site_publish::redact_publish_commit_message(
+            "publish: add sk-123456789012345678901234 from D:\\novel\\private.db",
+        );
+    assert!(!redacted_commit.contains("sk-123456789012345678901234"));
+    assert!(!redacted_commit.contains("D:\\novel"));
+}
+
+#[test]
 fn firefly_git_plan_stages_only_generated_post_and_keeps_push_optional() {
     let repo = PathBuf::from(r"D:\Learning\Code\Git\website\Firefly");
     let steps = plan_firefly_git_steps(

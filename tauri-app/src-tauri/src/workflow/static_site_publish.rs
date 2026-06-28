@@ -3,6 +3,7 @@ use std::process::Command;
 
 use crate::models::StaticSitePost;
 use crate::security::redact::redact_secrets;
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct FireflyPublishRequest {
@@ -97,7 +98,7 @@ pub fn render_firefly_markdown(post: &StaticSitePost) -> String {
     let tags = post
         .tags
         .iter()
-        .map(|tag| yaml_string(tag))
+        .map(|tag| yaml_string(&redact_publish_text(tag)))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -114,15 +115,24 @@ comment: true\n\
 ---\n\n\
 <!-- generated-slug: {} -->\n\n\
 {}\n",
-        yaml_string(&post.title),
-        yaml_string(&post.published),
-        yaml_string(&post.description),
+        yaml_string(&redact_publish_text(&post.title)),
+        yaml_string(&redact_publish_text(&post.published)),
+        yaml_string(&redact_publish_text(&post.description)),
         tags,
-        yaml_string(category),
-        yaml_string(lang),
+        yaml_string(&redact_publish_text(category)),
+        yaml_string(&redact_publish_text(lang)),
         slug,
         body
     )
+}
+
+pub fn redact_publish_commit_message(message: &str) -> String {
+    let redacted = redact_publish_text(message);
+    if redacted.trim().is_empty() {
+        "publish: add generated post".to_string()
+    } else {
+        redacted
+    }
 }
 
 fn yaml_string(value: &str) -> String {
@@ -143,8 +153,30 @@ fn redact_publish_body(body: &str) -> String {
                 || lower.contains("token")
                 || lower.contains("password"))
         })
+        .map(redact_publish_text)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_publish_text(value: &str) -> String {
+    let mut result = redact_secrets(value);
+    let token_like = Regex::new(r"(?i)\b(token|secret|password)[=:]\s*[a-zA-Z0-9_\-.]{10,}")
+        .expect("valid publish secret redaction regex");
+    result = token_like
+        .replace_all(&result, "$1=***REDACTED***")
+        .to_string();
+
+    let windows_path =
+        Regex::new(r#"(?i)\b[A-Z]:\\[^\s"'<>|]+"#).expect("valid Windows path redaction regex");
+    result = windows_path
+        .replace_all(&result, "[LOCAL_PATH_REDACTED]")
+        .to_string();
+
+    let unix_path = Regex::new(r#"(?i)(/Users|/home)/[^\s"'<>|]+"#)
+        .expect("valid Unix home path redaction regex");
+    unix_path
+        .replace_all(&result, "[LOCAL_PATH_REDACTED]")
+        .to_string()
 }
 
 pub fn post_path(posts_dir: &str, slug: &str) -> PathBuf {
@@ -212,7 +244,7 @@ pub fn plan_firefly_git_steps(
         "git".to_string(),
         "commit".to_string(),
         "-m".to_string(),
-        commit_message.to_string(),
+        redact_publish_commit_message(commit_message),
     ]);
     if push_enabled {
         let mut push = vec![
@@ -287,7 +319,7 @@ pub fn publish_firefly_git(
             "git".to_string(),
             "commit".to_string(),
             "-m".to_string(),
-            request.commit_message.clone(),
+            redact_publish_commit_message(&request.commit_message),
         ],
         &mut command_log,
     )?;
@@ -357,7 +389,7 @@ fn run_command(
     let Some((program, rest)) = args.split_first() else {
         return Err("Empty command".to_string());
     };
-    command_log.push(redact_secrets(&format!("$ {}", args.join(" "))));
+    command_log.push(redact_publish_text(&format!("$ {}", args.join(" "))));
     let output = Command::new(program)
         .args(rest)
         .current_dir(cwd)
@@ -366,18 +398,18 @@ fn run_command(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if !stdout.trim().is_empty() {
-        command_log.push(redact_secrets(stdout.trim()));
+        command_log.push(redact_publish_text(stdout.trim()));
     }
     if !stderr.trim().is_empty() {
-        command_log.push(redact_secrets(stderr.trim()));
+        command_log.push(redact_publish_text(stderr.trim()));
     }
     if output.status.success() {
         Ok(stdout)
     } else {
         Err(format!(
             "Command failed ({}): {}",
-            args.join(" "),
-            redact_secrets(stderr.trim())
+            redact_publish_text(&args.join(" ")),
+            redact_publish_text(stderr.trim())
         ))
     }
 }
