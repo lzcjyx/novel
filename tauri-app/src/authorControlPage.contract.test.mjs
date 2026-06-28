@@ -16,8 +16,9 @@ test("author control page is localized in a page module", () => {
 });
 
 test("author control navigation is wired through App", () => {
-  assert.ok(appSource.includes('authorControl: "作者控制"'), "missing Chinese Author Control nav label");
-  assert.ok(appSource.includes('case "authorControl": return <AuthorControlPage'), "missing Author Control page switch");
+  assert.ok(appSource.includes("OrchestrateAgentPage"), "missing orchestrator surface");
+  assert.ok(appSource.includes('{ id: "author", label: "作者控制" }'), "missing internal Author Control tab");
+  assert.ok(appSource.includes('mode === "author" && <AuthorControlPage selected={selected} />'), "missing Author Control surface switch");
 });
 
 test("author control page exposes core author-control surfaces", () => {

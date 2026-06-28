@@ -18,6 +18,9 @@ interface PetStatus {
   ragState: string;
   animationLevel: string;
   compact: boolean;
+  phaseLabel?: string | null;
+  progressPct?: number | null;
+  statusText?: string | null;
 }
 
 const defaultStatus: PetStatus = {
@@ -29,6 +32,9 @@ const defaultStatus: PetStatus = {
   ragState: "unknown",
   animationLevel: "subtle",
   compact: false,
+  phaseLabel: null,
+  progressPct: null,
+  statusText: null,
 };
 
 const stateCopy: Record<string, [string, string]> = {
@@ -37,6 +43,7 @@ const stateCopy: Record<string, [string, string]> = {
   idle: ["待命", "可以继续推进章节"],
   attention: ["需要查看", "刚刚有错误或提示"],
   context: ["上下文受限", "RAG 向量检索未开启"],
+  memory: ["整理记忆", "正在沉淀章节连续性"],
 };
 
 export function PetWindow() {
@@ -52,7 +59,7 @@ export function PetWindow() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen<PetStatus>("pet-status", (event) => {
-      setStatus({ ...defaultStatus, ...event.payload });
+      setStatus((current) => ({ ...current, ...event.payload }));
     }).then((cleanup) => {
       unlisten = cleanup;
     });
@@ -74,6 +81,7 @@ export function PetWindow() {
     const hasError = status.message.includes("错误") || status.message.toLowerCase().includes("error");
     if (!status.selected) return "waiting";
     if (hasError) return "attention";
+    if (status.phaseLabel?.includes("记忆") || status.phaseLabel?.includes("圣经")) return "memory";
     if (status.loading || status.running) return "working";
     if (status.ragState === "disabled" || status.ragState === "empty" || status.ragState === "stale") return "context";
     return "idle";
@@ -83,6 +91,11 @@ export function PetWindow() {
     ? status.animationLevel
     : "subtle";
   const copy = stateCopy[petState] || stateCopy.idle;
+  const progressPct = typeof status.progressPct === "number"
+    ? Math.max(0, Math.min(100, Math.round(status.progressPct)))
+    : null;
+  const phaseText = status.phaseLabel || copy[0];
+  const detailText = status.statusText || status.message || copy[1];
 
   const persistPosition = async () => {
     try {
@@ -138,10 +151,17 @@ export function PetWindow() {
 
       {expanded && !status.compact && (
         <section className="pet-bubble" aria-live="polite">
-          <strong>{copy[0]}</strong>
+          <strong>{phaseText}</strong>
           <span>{status.projectName || "未选择项目"}</span>
-          <span>{status.message || copy[1]}</span>
-          <span>RAG: {status.ragState}</span>
+          <span>{detailText}</span>
+          <span className={`pet-rag-indicator pet-rag-${status.ragState || "unknown"}`}>
+            RAG {status.ragState || "unknown"}
+          </span>
+          {progressPct !== null && (
+            <span className="pet-progress" aria-label={`Agent 进度 ${progressPct}%`}>
+              <span style={{ width: `${progressPct}%` }} />
+            </span>
+          )}
         </section>
       )}
 

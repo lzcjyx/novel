@@ -65,6 +65,15 @@ const formatPassRate = (value: NullableNumber) =>
 const scoreColor = (value: NullableNumber) =>
   isFiniteNumber(value) && value >= 85 ? "var(--success)" : "var(--primary)";
 
+const agentSurfaceMap: Record<string, { label: string; icon: string; detail: string }> = {
+  agent: { label: "Agent 总控", icon: "A", detail: "任务、阶段、预览" },
+  orchestrate: { label: "流程编排", icon: "F", detail: "上下文与工具链" },
+  memory: { label: "记忆中枢", icon: "M", detail: "RAG、圣经、图谱" },
+  quality: { label: "质量审稿", icon: "Q", detail: "多 Agent 审稿" },
+  ops: { label: "发布运维", icon: "O", detail: "任务与发布" },
+  settings: { label: "项目设置", icon: "S", detail: "项目与模型" },
+};
+
 // ---- Context ----
 interface AppContextType {
   projects: ProjectStats[];
@@ -84,7 +93,7 @@ function App() {
   const isPetWindow = new URLSearchParams(window.location.search).get("window") === "pet";
   if (isPetWindow) return <PetWindow />;
 
-  const [page, setPage] = useState("dashboard");
+  const [page, setPage] = useState("agent");
   const [projects, setProjects] = useState<ProjectStats[]>([]);
   const [selected, setSelected] = useState("");
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -140,24 +149,6 @@ function App() {
 
   const ctx = { projects, selected, setSelected, settings, refreshSettings, status, logs, loading, setLoading, msg, setMsg };
 
-  const navLabels: Record<string, string> = {
-    dashboard: "仪表盘", projects: "项目", chapters: "章节",
-    plans: "章节计划", reviews: "审稿", jobs: "任务", bible: "小说圣经", graph: "关系图谱", runtime: "运行台", authorControl: "作者控制", learn: "学习库", settings: "设置",
-  };
-  const navIcon: Record<string, string> = {
-    dashboard: "D",
-    projects: "P",
-    chapters: "C",
-    plans: "L",
-    reviews: "R",
-    jobs: "J",
-    bible: "B",
-    graph: "G",
-    runtime: "T",
-    authorControl: "A",
-    learn: "K",
-    settings: "S",
-  };
   const selectedProject = projects.find(project => project.id === selected);
   const togglePublishSchedule = async () => {
     if (!settings) return;
@@ -194,6 +185,12 @@ function App() {
 
   const renderPage = () => {
     switch (page) {
+      case "agent": return <Dashboard />;
+      case "orchestrate": return <OrchestrateAgentPage selected={selected} settings={settings} refreshSettings={refreshSettings} />;
+      case "memory": return <MemoryAgentPage />;
+      case "quality": return <ReviewPage />;
+      case "ops": return <OpsAgentPage />;
+      case "settings": return <ProjectSettingsAgentPage refreshSettings={refreshSettings} refreshProjects={loadProjects} />;
       case "dashboard": return <Dashboard />;
       case "projects": return <ProjectList refresh={loadProjects} />;
       case "chapters": return <Chapters />;
@@ -205,7 +202,6 @@ function App() {
       case "runtime": return <RuntimePage selected={selected} settings={settings} refreshSettings={refreshSettings} />;
       case "authorControl": return <AuthorControlPage selected={selected} />;
       case "learn": return <LearnPage />;
-      case "settings": return <SettingsPage refreshSettings={refreshSettings} />;
       default: return <Dashboard />;
     }
   };
@@ -256,11 +252,12 @@ function App() {
         </header>
         <div className="app-navigation-view">
           <aside className="navigation-pane">
-            <div className="navigation-brand">AI Novel Factory</div>
-            {Object.keys(navLabels).map(p => (
+            <div className="navigation-brand">Agent Novel OS</div>
+            {Object.keys(agentSurfaceMap).map(p => (
               <button key={p} className={`navigation-item ${page === p ? "active" : ""}`} onClick={() => setPage(p)} aria-current={page === p ? "page" : undefined}>
-                <span className="nav-icon" aria-hidden="true">{navIcon[p]}</span>
-                <span>{navLabels[p]}</span>
+                <span className="nav-icon" aria-hidden="true">{agentSurfaceMap[p].icon}</span>
+                <span>{agentSurfaceMap[p].label}</span>
+                <span className="text-meta">{agentSurfaceMap[p].detail}</span>
               </button>
             ))}
             <select className="sidebar-select navigation-project-select" value={selected} onChange={e => setSelected(e.target.value)} aria-label="当前项目">
@@ -281,7 +278,7 @@ function App() {
           <section className="app-frame">
             <div className="app-command-bar">
               <div className="command-context">
-                <span className="command-kicker">{navLabels[page]}</span>
+                <span className="command-kicker">{agentSurfaceMap[page]?.label || "Agent 总控"}</span>
                 <strong>{selectedProject?.name || "未选择项目"}</strong>
               </div>
               <div className="info-bar" data-state={status?.is_running ? "running" : "ready"} role="status">
@@ -296,6 +293,143 @@ function App() {
         </div>
       </div>
     </Ctx.Provider>
+  );
+}
+
+function AgentSectionTabs({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: Array<{ id: string; label: string }>;
+  active: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <div className="agent-section-tabs" role="tablist" aria-label="Agent surface modes">
+      {tabs.map(tab => (
+        <button
+          key={tab.id}
+          type="button"
+          className={`agent-section-tab ${active === tab.id ? "active" : ""}`}
+          onClick={() => onChange(tab.id)}
+          role="tab"
+          aria-selected={active === tab.id}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function OrchestrateAgentPage({
+  selected,
+  settings,
+  refreshSettings,
+}: {
+  selected: string;
+  settings: AppSettings | null;
+  refreshSettings: () => void;
+}) {
+  const [mode, setMode] = useState("runtime");
+  return (
+    <div className="agent-surface">
+      <header className="agent-surface-header">
+        <div>
+          <span className="command-kicker">Orchestrator Agent</span>
+          <h2 className="page-title">流程编排</h2>
+        </div>
+        <p>把运行台和作者控制收束到一个编排面板，保留深度控制但减少顶层入口冲突。</p>
+      </header>
+      <AgentSectionTabs
+        active={mode}
+        onChange={setMode}
+        tabs={[
+          { id: "runtime", label: "运行台" },
+          { id: "author", label: "作者控制" },
+        ]}
+      />
+      {mode === "runtime" && <RuntimePage selected={selected} settings={settings} refreshSettings={refreshSettings} />}
+      {mode === "author" && <AuthorControlPage selected={selected} />}
+    </div>
+  );
+}
+
+function MemoryAgentPage() {
+  const [mode, setMode] = useState("learn");
+  return (
+    <div className="agent-surface">
+      <header className="agent-surface-header">
+        <div>
+          <span className="command-kicker">Memory Agent</span>
+          <h2 className="page-title">记忆中枢</h2>
+        </div>
+        <p>把学习库、小说圣经和关系图谱收束为同一个连续性记忆工作区。</p>
+      </header>
+      <AgentSectionTabs
+        active={mode}
+        onChange={setMode}
+        tabs={[
+          { id: "learn", label: "学习条目" },
+          { id: "bible", label: "小说圣经" },
+          { id: "graph", label: "关系图谱" },
+        ]}
+      />
+      {mode === "learn" && <LearnPage />}
+      {mode === "bible" && <BiblePage />}
+      {mode === "graph" && <KnowledgeGraphPage />}
+    </div>
+  );
+}
+
+function OpsAgentPage() {
+  return (
+    <div className="agent-surface">
+      <header className="agent-surface-header">
+        <div>
+          <span className="command-kicker">Ops Agent</span>
+          <h2 className="page-title">发布运维</h2>
+        </div>
+        <p>集中查看生成任务、失败恢复和发布前状态。</p>
+      </header>
+      <JobsPage />
+    </div>
+  );
+}
+
+function ProjectSettingsAgentPage({
+  refreshSettings,
+  refreshProjects,
+}: {
+  refreshSettings: () => void;
+  refreshProjects: () => void;
+}) {
+  const [mode, setMode] = useState("settings");
+  return (
+    <div className="agent-surface">
+      <header className="agent-surface-header">
+        <div>
+          <span className="command-kicker">Project Agent</span>
+          <h2 className="page-title">项目设置</h2>
+        </div>
+        <p>项目、章节计划和模型参数留在一个配置面板里，减少顶层跳转。</p>
+      </header>
+      <AgentSectionTabs
+        active={mode}
+        onChange={setMode}
+        tabs={[
+          { id: "settings", label: "模型与发布" },
+          { id: "projects", label: "项目" },
+          { id: "chapters", label: "章节" },
+          { id: "plans", label: "章节计划" },
+        ]}
+      />
+      {mode === "settings" && <SettingsPage refreshSettings={refreshSettings} />}
+      {mode === "projects" && <ProjectList refresh={refreshProjects} />}
+      {mode === "chapters" && <Chapters />}
+      {mode === "plans" && <ChapterPlans />}
+    </div>
   );
 }
 
@@ -316,6 +450,7 @@ function Dashboard() {
   const [previewMsg, setPreviewMsg] = useState("");
   const [progressFeed, setProgressFeed] = useState<LiveProgressEntry[]>([]);
   const liveProgressRef = useRef<HTMLDivElement | null>(null);
+  const lastPetEmitRef = useRef(0);
 
   const pipelineOrder = ["acquire_lock","load_canon","retrieve_context","generate_draft","aggregate_reviews","revise","export","update_canon","complete"];
   const pipelineLabels: Record<string,string> = {
@@ -328,12 +463,28 @@ function Dashboard() {
     const parsed = new Date(timestamp);
     return Number.isNaN(parsed.getTime()) ? timestamp.slice(0, 8) : parsed.toLocaleTimeString();
   };
+  const emitPetPipelineStatus = useCallback((ev: PipelineStep) => {
+    const now = Date.now();
+    const failed = ev.status.toLowerCase().includes("fail");
+    const complete = ev.progress_pct >= 100;
+    if (!failed && !complete && now - lastPetEmitRef.current < 250) return;
+    lastPetEmitRef.current = now;
+    void emitTo("pet", "pet-status", {
+      loading: !complete && !failed,
+      running: !complete && !failed,
+      phaseLabel: pipelineLabels[ev.step] || ev.step,
+      progressPct: Math.max(0, Math.min(100, Math.round(ev.progress_pct))),
+      statusText: ev.detail || ev.status,
+      message: ev.detail || ev.status,
+    }).catch(() => {});
+  }, []);
 
   // Listen for Tauri pipeline events
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listen("pipeline-step", (event: any) => {
       const ev = event.payload as PipelineStep;
+      emitPetPipelineStatus(ev);
       if (ev.preview_text) {
         setLivePreview({
           title: ev.preview_title || "未命名",
@@ -516,7 +667,7 @@ function Dashboard() {
           <div style={{ fontSize: 14, fontWeight: 400, marginTop: 8, opacity: 0.8 }}>{selNovel.genre}</div>
         </div>
       )}
-      <h2 className="page-title" style={selNovel ? undefined : {}}>{selNovel ? "" : "仪表盘"}</h2>
+      <h2 className="page-title" style={selNovel ? undefined : {}}>Agent 总控台</h2>
 
       <div className="status-grid">
         {[

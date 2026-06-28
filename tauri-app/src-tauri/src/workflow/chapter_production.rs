@@ -1440,6 +1440,31 @@ pub async fn generate_next_chapter_with_stage_providers(
         Err(e) => log(log_tx, &format!("Self-reflection skipped: {}", e)),
     }
 
+    match learning::remember_chapter_for_continuity(
+        db,
+        project_id,
+        &chapter_id,
+        &final_version_id,
+        plan.sequence,
+        &final_title,
+        &final_body,
+        &final_summary,
+        &final_decision,
+        final_score,
+        final_word_count,
+    ) {
+        Ok(Some(entry_id)) => {
+            let _ =
+                task_transaction::record_task_owned_row(db, &job_id, "learning_entries", &entry_id);
+            log(
+                log_tx,
+                &format!("Saved chapter continuity memory {}", &entry_id[..8]),
+            );
+        }
+        Ok(None) => {}
+        Err(e) => log(log_tx, &format!("Chapter continuity memory skipped: {}", e)),
+    }
+
     if final_decision == "publish_ready" {
         chapters::mark_chapter_plan_completed(db, &plan.id)?;
     }

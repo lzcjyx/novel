@@ -1019,6 +1019,30 @@ async fn chapter_pipeline_uses_writing_context_and_finalizes_plan() {
     };
     assert_eq!(reflection_count, 1);
 
+    let chapter_memory_count: i64 = {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM learning_entries WHERE project_id = ?1 AND source_type = 'chapter_memory'",
+            rusqlite::params![project_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(chapter_memory_count, 1);
+
+    let chapter_memory: (String, String, String) = {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT category, pattern_name, application_notes FROM learning_entries WHERE project_id = ?1 AND source_type = 'chapter_memory' LIMIT 1",
+            rusqlite::params![project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(chapter_memory.0, "continuity_memory");
+    assert!(chapter_memory.1.contains("章节记忆"));
+    assert!(chapter_memory.2.contains("下一章"));
+
     let jobs = tauri_app_lib::db::generation_jobs::get_generation_jobs(&db, &project_id).unwrap();
     let job_metadata: serde_json::Value = serde_json::from_str(&jobs[0].metadata).unwrap();
     assert_eq!(

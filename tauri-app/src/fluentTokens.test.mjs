@@ -96,10 +96,15 @@ test("graph workbench uses light Fluent graph tokens", () => {
   assert.doesNotMatch(css, /\.graph-edge\.active \.graph-edge-base\s*\{[\s\S]*208,\s*168,\s*92/);
 });
 
-test("top-level shell uses Chinese-first navigation and status copy", () => {
-  for (const label of ["仪表盘", "项目", "章节", "章节计划", "审稿", "任务", "小说圣经", "关系图谱", "运行台", "作者控制", "学习库", "设置"]) {
-    assert.ok(app.includes(label), `missing Chinese nav label ${label}`);
+test("top-level shell is reframed as an agent workbench with consolidated surfaces", () => {
+  for (const label of ["Agent 总控", "流程编排", "记忆中枢", "质量审稿", "发布运维", "项目设置"]) {
+    assert.ok(app.includes(label), `missing agent nav label ${label}`);
   }
+  for (const legacy of ["章节计划", "小说圣经", "关系图谱", "学习库"]) {
+    assert.ok(!app.includes(`${legacy}",`), `legacy rail label still exposed: ${legacy}`);
+  }
+  assert.match(app, /Agent 总控台/);
+  assert.match(app, /agentSurfaceMap/);
   assert.match(app, /生成中/);
   assert.match(app, /就绪/);
 });
@@ -124,6 +129,15 @@ test("desktop pet is configurable and status aware without canvas animation", ()
   assert.match(css, /\.pet-window-static/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.doesNotMatch(app, /requestAnimationFrame\(.*pet/i);
+});
+
+test("desktop pet receives throttled agent phase status", () => {
+  assert.match(app, /emitPetPipelineStatus/);
+  assert.match(app, /lastPetEmitRef/);
+  assert.match(app, /phaseLabel/);
+  assert.match(app, /progressPct/);
+  assert.match(css, /\.pet-progress/);
+  assert.match(css, /\.pet-rag-indicator/);
 });
 
 test("desktop pet runs in an independent transparent Tauri window", () => {

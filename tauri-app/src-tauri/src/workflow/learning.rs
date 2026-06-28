@@ -365,6 +365,68 @@ pub fn save_reflection_entries(
     Ok(())
 }
 
+pub fn remember_chapter_for_continuity(
+    db: &Database,
+    project_id: &str,
+    chapter_id: &str,
+    chapter_version_id: &str,
+    sequence: i32,
+    title: &str,
+    body_markdown: &str,
+    summary: &str,
+    decision: &str,
+    final_score: f64,
+    word_count: i32,
+) -> Result<Option<String>, String> {
+    let clean_title = title.trim();
+    let title = if clean_title.is_empty() {
+        format!("第 {} 章", sequence)
+    } else {
+        clean_title.to_string()
+    };
+    let excerpt = learning_intake::truncate_chars(body_markdown, 900);
+    let summary = if summary.trim().is_empty() {
+        learning_intake::truncate_chars(body_markdown, 260)
+    } else {
+        summary.trim().to_string()
+    };
+    let metadata = serde_json::json!({
+        "chapter_id": chapter_id,
+        "chapter_version_id": chapter_version_id,
+        "sequence": sequence,
+        "decision": decision,
+        "final_score": final_score,
+        "word_count": word_count,
+    })
+    .to_string();
+    let entry = LearningEntry {
+        id: String::new(),
+        project_id: project_id.to_string(),
+        source_type: "chapter_memory".to_string(),
+        source_url: None,
+        source_title: Some(format!("Chapter {}: {}", sequence, title)),
+        category: "continuity_memory".to_string(),
+        pattern_name: format!("章节记忆：{}", title),
+        pattern_description: format!(
+            "第 {} 章完成，决策={}，终评={:.1}，字数={}。关键内容：{}",
+            sequence, decision, final_score, word_count, summary
+        ),
+        example_text: Some(excerpt),
+        application_notes: Some(format!(
+            "下一章写作时优先保持第 {} 章造成的事实、情绪余波、未解决线索和角色关系变化。",
+            sequence
+        )),
+        confidence: 0.95,
+        usage_count: 0,
+        last_used_at: None,
+        metadata,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let saved = save_learning_entries_with_style_drafts(db, project_id, &[entry])?;
+    Ok(saved.into_iter().next())
+}
+
 fn is_style_learning_category(category: &str) -> bool {
     matches!(
         category.trim().to_lowercase().as_str(),
