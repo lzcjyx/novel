@@ -213,16 +213,43 @@ fn focus_main_window(app: &tauri::AppHandle) {
 
 fn apply_pet_window_preferences(app: &tauri::AppHandle, settings: &AppSettings) {
     if let Some(window) = app.get_webview_window("pet") {
-        let _ = window.set_position(tauri::PhysicalPosition::new(
-            settings.pet_position_x,
-            settings.pet_position_y,
-        ));
+        let (x, y) =
+            clamped_pet_window_position(&window, settings.pet_position_x, settings.pet_position_y);
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
         if settings.pet_enabled {
             let _ = window.show();
+            let _ = window.unminimize();
         } else {
             let _ = window.hide();
         }
     }
+}
+
+fn clamped_pet_window_position(window: &tauri::WebviewWindow, x: i32, y: i32) -> (i32, i32) {
+    let (work_width, work_height) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .map(|monitor| {
+            let size = monitor.size();
+            (size.width as i32, size.height as i32)
+        })
+        .unwrap_or((1920, 1080));
+    let (window_width, window_height) = window
+        .outer_size()
+        .ok()
+        .map(|size| (size.width as i32, size.height as i32))
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .unwrap_or((220, 96));
+    let position = workflow::pet_window::clamp_pet_position(
+        x,
+        y,
+        work_width,
+        work_height,
+        window_width,
+        window_height,
+    );
+    (position.x, position.y)
 }
 
 fn get_api_key_fallback(state: &AppState, provider: &str) -> Result<String, String> {
@@ -1446,8 +1473,21 @@ async fn show_pet_window(
 ) -> Result<(), String> {
     let mut settings = db::settings::get_settings(&state.db)?;
     settings.pet_enabled = true;
+    if let Some(window) = app.get_webview_window("pet") {
+        let (x, y) =
+            clamped_pet_window_position(&window, settings.pet_position_x, settings.pet_position_y);
+        settings.pet_position_x = x;
+        settings.pet_position_y = y;
+    }
     db::settings::save_settings(&state.db, &settings)?;
     apply_pet_window_preferences(&app, &settings);
+    if let Some(window) = app.get_webview_window("pet") {
+        window
+            .show()
+            .map_err(|e| format!("Show pet window: {}", e))?;
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
     Ok(())
 }
 
@@ -1469,11 +1509,19 @@ async fn hide_pet_window(
 
 #[tauri::command]
 async fn save_pet_position(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     x: i32,
     y: i32,
 ) -> Result<(), String> {
     let mut settings = db::settings::get_settings(&state.db)?;
+    let (x, y) = app
+        .get_webview_window("pet")
+        .map(|window| clamped_pet_window_position(&window, x, y))
+        .unwrap_or_else(|| {
+            let position = workflow::pet_window::clamp_pet_position(x, y, 1920, 1080, 220, 96);
+            (position.x, position.y)
+        });
     settings.pet_position_x = x;
     settings.pet_position_y = y;
     db::settings::save_settings(&state.db, &settings)
@@ -1682,6 +1730,119 @@ async fn publish_blog_draft(
     Ok(())
 }
 
+#[tauri::command]
+async fn list_due_publications(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PublicationQueueItem>, String> {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    db::publication_queue::list_due_publications(&state.db, &now)
+}
+
+#[tauri::command]
+async fn process_due_publications(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PublicationQueueItem>, String> {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let due = db::publication_queue::list_due_publications(&state.db, &now)?;
+    let settings = db::settings::get_settings(&state.db)?;
+    let mut processed = Vec::new();
+    for item in due {
+        if let Err(err) = db::publication_queue::claim_publication(&state.db, &item.id)
+            .and_then(|_| process_publication_queue_item(&state.db, &settings, &item))
+        {
+            let _ = db::publication_queue::mark_publication_failed(&state.db, &item.id, &err);
+            add_log(
+                &state,
+                &format!("Publication {} failed: {}", &item.id[..8], err),
+            );
+        } else {
+            processed.push(item);
+        }
+    }
+    Ok(processed)
+}
+
+#[tauri::command]
+async fn retry_publication(
+    state: tauri::State<'_, AppState>,
+    publication_id: String,
+) -> Result<(), String> {
+    db::publication_queue::retry_publication(&state.db, &publication_id)
+}
+
+fn process_publication_queue_item(
+    db: &Database,
+    settings: &AppSettings,
+    item: &PublicationQueueItem,
+) -> Result<(), String> {
+    if settings.publication_target_provider != "firefly_git" {
+        return Err(format!(
+            "Unsupported publication target provider: {}",
+            settings.publication_target_provider
+        ));
+    }
+    if settings.publication_target_path.trim().is_empty() {
+        return Err("Publication target path is not configured.".to_string());
+    }
+    let chapter = db::chapters::get_chapter(db, &item.chapter_id)?;
+    let version = db::chapters::get_latest_version(db, &item.chapter_id)?
+        .ok_or_else(|| format!("No chapter version found for {}", item.chapter_id))?;
+    let queue_metadata = serde_json::from_str::<serde_json::Value>(&item.metadata)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let title = queue_metadata
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .or(version.title.as_deref())
+        .or(chapter.title.as_deref())
+        .unwrap_or("Untitled")
+        .to_string();
+    let slug = queue_metadata
+        .get("slug")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| workflow::static_site_publish::sanitize_post_slug(&title));
+    let post = StaticSitePost {
+        title: title.clone(),
+        slug: slug.clone(),
+        published: chrono::Local::now().format("%Y-%m-%d").to_string(),
+        description: chapter.summary.clone().unwrap_or_default(),
+        tags: Vec::new(),
+        category: Some("小说连载".to_string()),
+        lang: Some("zh-CN".to_string()),
+        body_markdown: version.body_markdown.unwrap_or_default(),
+    };
+    let commit_message = settings
+        .publication_commit_template
+        .replace("{title}", &title)
+        .replace("{slug}", &slug);
+    let result = workflow::static_site_publish::publish_firefly_git(
+        &workflow::static_site_publish::FireflyPublishRequest {
+            repo_path: std::path::PathBuf::from(&settings.publication_target_path),
+            posts_dir: settings.publication_posts_dir.clone(),
+            build_command: if settings.publication_validate_build {
+                settings.publication_build_command.clone()
+            } else {
+                String::new()
+            },
+            commit_message,
+            remote_name: settings.publication_remote_name.clone(),
+            branch: settings.publication_branch.clone(),
+            push_enabled: settings.publication_push_enabled,
+            validate_build: settings.publication_validate_build,
+            dry_run: settings.publication_dry_run,
+            post,
+        },
+    )?;
+    let mut metadata = queue_metadata;
+    metadata["published_target"] = serde_json::json!({
+        "post_path": result.post_path,
+        "commit_id": result.commit_id,
+        "dry_run": settings.publication_dry_run,
+        "command_log": result.command_log,
+    });
+    db::publication_queue::mark_publication_published(db, &item.id, &metadata)
+}
+
 // ============================================================================
 // Logs + Status
 // ============================================================================
@@ -1779,6 +1940,10 @@ pub fn run() {
                 &db,
                 600,
                 "Application restarted while this generation job was still running.",
+            );
+            let _ = db::publication_queue::recover_interrupted_publications(
+                &db,
+                "Application restarted while this publication was still running.",
             );
 
             app.manage(AppState {
@@ -1949,6 +2114,9 @@ pub fn run() {
             test_embedding_provider,
             export_markdown,
             publish_blog_draft,
+            list_due_publications,
+            process_due_publications,
+            retry_publication,
             get_logs,
             get_status,
             reset_running,

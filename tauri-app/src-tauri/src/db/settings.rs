@@ -80,6 +80,17 @@ pub fn get_settings(db: &Database) -> Result<AppSettings, String> {
             "blog_provider" => settings.blog_provider = v.to_string(),
             "blog_url" => settings.blog_url = Some(v.to_string()),
             "blog_username" => settings.blog_username = Some(v.to_string()),
+            "publish_schedule_enabled" => settings.publish_schedule_enabled = v == "true",
+            "publication_target_provider" => settings.publication_target_provider = v.to_string(),
+            "publication_target_path" => settings.publication_target_path = v.to_string(),
+            "publication_posts_dir" => settings.publication_posts_dir = v.to_string(),
+            "publication_remote_name" => settings.publication_remote_name = v.to_string(),
+            "publication_branch" => settings.publication_branch = parse_optional_string(v),
+            "publication_build_command" => settings.publication_build_command = v.to_string(),
+            "publication_commit_template" => settings.publication_commit_template = v.to_string(),
+            "publication_push_enabled" => settings.publication_push_enabled = v == "true",
+            "publication_dry_run" => settings.publication_dry_run = v == "true",
+            "publication_validate_build" => settings.publication_validate_build = v != "false",
             "input_cost_per_million" => settings.input_cost_per_million = parse_optional_cost(v),
             "output_cost_per_million" => settings.output_cost_per_million = parse_optional_cost(v),
             "draft_model_profile_id" => settings.draft_model_profile_id = parse_optional_string(v),
@@ -218,6 +229,77 @@ pub fn save_settings(db: &Database, settings: &AppSettings) -> Result<(), String
     if let Some(ref user) = settings.blog_username {
         save_setting(db, "blog_username", &format!("\"{}\"", user))?;
     }
+    save_setting(
+        db,
+        "publish_schedule_enabled",
+        if settings.publish_schedule_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    save_setting(
+        db,
+        "publication_target_provider",
+        &format!("\"{}\"", settings.publication_target_provider),
+    )?;
+    save_setting(
+        db,
+        "publication_target_path",
+        &format!("\"{}\"", settings.publication_target_path),
+    )?;
+    save_setting(
+        db,
+        "publication_posts_dir",
+        &format!("\"{}\"", settings.publication_posts_dir),
+    )?;
+    save_setting(
+        db,
+        "publication_remote_name",
+        &format!("\"{}\"", settings.publication_remote_name),
+    )?;
+    save_optional_string_setting(
+        db,
+        "publication_branch",
+        settings.publication_branch.as_deref(),
+    )?;
+    save_setting(
+        db,
+        "publication_build_command",
+        &format!("\"{}\"", settings.publication_build_command),
+    )?;
+    save_setting(
+        db,
+        "publication_commit_template",
+        &format!("\"{}\"", settings.publication_commit_template),
+    )?;
+    save_setting(
+        db,
+        "publication_push_enabled",
+        if settings.publication_push_enabled {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    save_setting(
+        db,
+        "publication_dry_run",
+        if settings.publication_dry_run {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
+    save_setting(
+        db,
+        "publication_validate_build",
+        if settings.publication_validate_build {
+            "true"
+        } else {
+            "false"
+        },
+    )?;
     save_optional_cost_setting(
         db,
         "input_cost_per_million",

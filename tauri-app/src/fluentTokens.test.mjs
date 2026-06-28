@@ -104,6 +104,16 @@ test("top-level shell uses Chinese-first navigation and status copy", () => {
   assert.match(app, /就绪/);
 });
 
+test("navigation exposes scheduled writing without hiding detailed publishing settings", () => {
+  assert.match(app, /定时写作/);
+  assert.match(app, /publish_schedule_enabled/);
+  assert.match(app, /publication_target_path/);
+  assert.match(app, /publication_target_provider/);
+  assert.match(app, /publication_posts_dir/);
+  assert.match(app, /publication_push_enabled/);
+  assert.match(app, /publication_validate_build/);
+});
+
 test("desktop pet is configurable and status aware without canvas animation", () => {
   assert.doesNotMatch(app, /function AppPet/);
   assert.match(app, /PetWindow/);

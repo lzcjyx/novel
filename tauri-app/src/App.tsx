@@ -29,7 +29,7 @@ interface JobMetadata { phase_events?: JobPhaseEvent[]; phase_summary?: JobPhase
 interface GenerationResult { ok: boolean; message: string; chapter_id?: string; chapter_title?: string; sequence?: number; word_count?: number; final_score?: number; decision?: string; }
 interface StatusResponse { ok: boolean; novel?: { name: string; genre?: string; }; slug?: string; chapter_count?: number; chapters_today?: number; plans_left?: number; total_words?: number; is_running: boolean; }
 interface BibleData { characters: any[]; locations: any[]; organizations: any[]; items: any[]; world_lore: any[]; magic_systems: any[]; canon_rules: any[]; plot_threads: any[]; foreshadowing: any[]; style_guides: any[]; timeline_events: any[]; }
-interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; pet_enabled: boolean; pet_animation_level: string; pet_compact_mode: boolean; pet_position_x: number; pet_position_y: number; }
+interface AppSettings { provider: string; model: string; base_url: string; embedding_model: string; embedding_provider: string; embedding_base_url: string; embedding_dim: number; quality_threshold: number; auto_publish: boolean; max_revise_count: number; daily_target_words: number; data_dir: string; debug_mode: boolean; blog_provider: string; publish_schedule_enabled: boolean; publication_target_provider: string; publication_target_path: string; publication_posts_dir: string; publication_remote_name: string; publication_branch?: string | null; publication_build_command: string; publication_commit_template: string; publication_push_enabled: boolean; publication_dry_run: boolean; publication_validate_build: boolean; input_cost_per_million?: number | null; output_cost_per_million?: number | null; draft_model_profile_id?: string | null; review_model_profile_id?: string | null; repair_model_profile_id?: string | null; embedding_model_profile_id?: string | null; summarization_model_profile_id?: string | null; pet_enabled: boolean; pet_animation_level: string; pet_compact_mode: boolean; pet_position_x: number; pet_position_y: number; }
 interface Project { id: string; name: string; }
 interface OperatorControls { generation_mode?: string; chapter_intent?: string; must_include_beats?: string; forbidden_moves?: string; style_emphasis?: string; pinned_source_keys?: string[]; unpinned_source_keys?: string[]; }
 type NullableNumber = number | null | undefined;
@@ -159,6 +159,13 @@ function App() {
     settings: "S",
   };
   const selectedProject = projects.find(project => project.id === selected);
+  const togglePublishSchedule = async () => {
+    if (!settings) return;
+    await invoke("update_settings", {
+      settings: { ...settings, publish_schedule_enabled: !settings.publish_schedule_enabled },
+    });
+    refreshSettings();
+  };
 
   useEffect(() => {
     const ragState = settings?.embedding_provider && settings.embedding_provider !== "none"
@@ -260,6 +267,16 @@ function App() {
               <option value="">-- 选择项目 --</option>
               {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
+            <button
+              type="button"
+              className={`navigation-item scheduler-toggle ${settings?.publish_schedule_enabled ? "active" : ""}`}
+              onClick={togglePublishSchedule}
+              aria-pressed={Boolean(settings?.publish_schedule_enabled)}
+            >
+              <span className="nav-icon" aria-hidden="true">W</span>
+              <span>定时写作</span>
+              <span className="text-meta">{settings?.publish_schedule_enabled ? "开启" : "关闭"}</span>
+            </button>
           </aside>
           <section className="app-frame">
             <div className="app-command-bar">
@@ -1794,6 +1811,48 @@ function SettingsPage({ refreshSettings }: { refreshSettings: () => void }) {
             <input type="checkbox" checked={settings.auto_publish} onChange={e => {
               invoke("update_settings", { settings: { ...settings, auto_publish: e.target.checked } }).then(refreshSettings);
             }} />
+          </div>
+          <div className="pet-settings-panel">
+            <h3 className="section-title">定时写作与自动发布</h3>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.publish_schedule_enabled} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, publish_schedule_enabled: e.target.checked } }).then(refreshSettings);
+              }} />
+              开启定时写作
+            </label>
+            <div className="bible-edit-field">
+              <label>发布适配器</label>
+              <select className="select" value={settings.publication_target_provider || "firefly_git"} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, publication_target_provider: e.target.value } }).then(refreshSettings);
+              }}>
+                <option value="firefly_git">Firefly / Git 静态站点</option>
+              </select>
+            </div>
+            <SaveField label="网站仓库路径" value={settings.publication_target_path || ""} onSave={v => invoke("update_settings", { settings: { ...settings, publication_target_path: v } }).then(refreshSettings)} />
+            <SaveField label="文章目录" value={settings.publication_posts_dir || "src/content/posts"} onSave={v => invoke("update_settings", { settings: { ...settings, publication_posts_dir: v || "src/content/posts" } }).then(refreshSettings)} />
+            <SaveField label="远端名称" value={settings.publication_remote_name || "origin"} onSave={v => invoke("update_settings", { settings: { ...settings, publication_remote_name: v || "origin" } }).then(refreshSettings)} />
+            <SaveField label="分支" value={settings.publication_branch || ""} onSave={v => invoke("update_settings", { settings: { ...settings, publication_branch: v.trim() || null } }).then(refreshSettings)} />
+            <SaveField label="构建命令" value={settings.publication_build_command || "pnpm build"} onSave={v => invoke("update_settings", { settings: { ...settings, publication_build_command: v || "pnpm build" } }).then(refreshSettings)} />
+            <SaveField label="提交模板" value={settings.publication_commit_template || "publish: add {title}"} onSave={v => invoke("update_settings", { settings: { ...settings, publication_commit_template: v || "publish: add {title}" } }).then(refreshSettings)} />
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.publication_validate_build} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, publication_validate_build: e.target.checked } }).then(refreshSettings);
+              }} />
+              发布前运行构建验证
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.publication_push_enabled} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, publication_push_enabled: e.target.checked } }).then(refreshSettings);
+              }} />
+              发布后推送远端
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={settings.publication_dry_run} onChange={e => {
+                invoke("update_settings", { settings: { ...settings, publication_dry_run: e.target.checked } }).then(refreshSettings);
+              }} />
+              仅演练，不写入外部仓库
+            </label>
+            <div className="text-meta">自动发布只会暂存生成的文章文件，不会暂存网站仓库中的其它改动。</div>
           </div>
           <div className="bible-edit-field">
             <label>调试模式</label>

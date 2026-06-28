@@ -15,6 +15,7 @@ pub mod migrations;
 pub mod model_profiles;
 pub mod projects;
 pub mod prompt_presets;
+pub mod publication_queue;
 pub mod reviews;
 pub mod settings;
 pub mod style_assets;

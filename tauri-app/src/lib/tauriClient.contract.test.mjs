@@ -120,3 +120,12 @@ test("tauri client exposes desktop pet window commands", () => {
   assert.match(source, /invoke<void>\("hide_pet_window"/);
   assert.match(source, /invoke<void>\("show_main_window"/);
 });
+
+test("tauri client exposes publication queue commands", () => {
+  assert.match(source, /listDuePublications<T>\(\): Promise<T>/);
+  assert.match(source, /processDuePublications<T>\(\): Promise<T>/);
+  assert.match(source, /retryPublication\(publicationId: string\): Promise<void>/);
+  assert.match(source, /invoke<T>\("list_due_publications"/);
+  assert.match(source, /invoke<T>\("process_due_publications"/);
+  assert.match(source, /invoke<void>\("retry_publication"/);
+});

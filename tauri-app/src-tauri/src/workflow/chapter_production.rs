@@ -1,7 +1,9 @@
 use crate::ai::client::{EmbeddingInputKind, ModelClient, ModelUsageReport};
 use crate::db::connection::Database;
 use crate::db::model_profiles::ModelProfile;
-use crate::db::{bible, blog_posts, chapters, generation_jobs, projects, reviews};
+use crate::db::{
+    bible, blog_posts, chapters, generation_jobs, projects, publication_queue, reviews,
+};
 use crate::export::markdown;
 use crate::models::*;
 use crate::prompts;
@@ -12,6 +14,47 @@ use crate::workflow::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+
+pub fn enqueue_publication_if_enabled(
+    db: &Database,
+    settings: &AppSettings,
+    project: &Project,
+    chapter_id: &str,
+    chapter_version_id: Option<&str>,
+    title: &str,
+) -> Result<Option<String>, String> {
+    if !settings.publish_schedule_enabled {
+        return Ok(None);
+    }
+    let provider = if settings.publication_target_provider.trim().is_empty() {
+        "firefly_git"
+    } else {
+        settings.publication_target_provider.as_str()
+    };
+    let slug = crate::workflow::static_site_publish::sanitize_post_slug(title);
+    let scheduled_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let input = PublicationQueueInput {
+        project_id: project.id.clone(),
+        chapter_id: chapter_id.to_string(),
+        chapter_version_id: chapter_version_id.map(str::to_string),
+        provider: provider.to_string(),
+        scheduled_at: Some(scheduled_at),
+        metadata: serde_json::json!({
+            "title": title,
+            "slug": slug,
+            "target": {
+                "provider": provider,
+                "posts_dir": settings.publication_posts_dir,
+                "remote": settings.publication_remote_name,
+                "branch": settings.publication_branch,
+                "push_enabled": settings.publication_push_enabled,
+                "validate_build": settings.publication_validate_build,
+                "dry_run": settings.publication_dry_run
+            }
+        }),
+    };
+    publication_queue::upsert_pending_publication(db, &input).map(Some)
+}
 
 fn log(log_tx: &mpsc::Sender<String>, msg: &str) {
     let _ = log_tx.try_send(format!(
@@ -971,7 +1014,7 @@ pub async fn generate_next_chapter_with_stage_providers(
     let mut current_aggregation = aggregation;
     let mut current_reviews = agent_reviews.clone();
 
-    let (final_decision, final_score, _final_version_id) = loop {
+    let (final_decision, final_score, final_version_id) = loop {
         if current_aggregation.decision == "needs_human_review"
             || current_aggregation.decision == "publish_ready"
         {
@@ -1300,6 +1343,30 @@ pub async fn generate_next_chapter_with_stage_providers(
                     None,
                 )?;
                 task_transaction::record_task_owned_row(db, &job_id, "blog_posts", &blog_id)?;
+                if let Some(queue_id) = enqueue_publication_if_enabled(
+                    db,
+                    &settings,
+                    &project,
+                    &chapter_id,
+                    Some(&final_version_id),
+                    &final_title,
+                )? {
+                    task_transaction::record_task_owned_row(
+                        db,
+                        &job_id,
+                        "publication_queue",
+                        &queue_id,
+                    )?;
+                    emit_job_event(
+                        db,
+                        &job_id,
+                        event_tx,
+                        "publication_queue",
+                        "queued",
+                        Some(&queue_id),
+                        88.0,
+                    );
+                }
             }
             Some(path)
         }

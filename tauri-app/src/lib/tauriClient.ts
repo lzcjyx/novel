@@ -58,6 +58,18 @@ export const tauriClient = {
     return invoke<void>("save_pet_position", { x, y });
   },
 
+  listDuePublications<T>(): Promise<T> {
+    return invoke<T>("list_due_publications");
+  },
+
+  processDuePublications<T>(): Promise<T> {
+    return invoke<T>("process_due_publications");
+  },
+
+  retryPublication(publicationId: string): Promise<void> {
+    return invoke<void>("retry_publication", { publicationId });
+  },
+
   getContextRules<T>(projectId: string): Promise<T> {
     return invoke<T>("get_context_rules", { projectId });
   },
